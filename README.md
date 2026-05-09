@@ -12,14 +12,6 @@
 |------|------|
 | ![](screenshots/1.jpg) | ![](screenshots/2.jpg) |
 
-| 设置 | 模型管理 |
-|------|------|
-| ![](screenshots/3.jpg) | ![](screenshots/4.jpg) |
-
-| 图片生成 |
-|------|
-| ![](screenshots/5.jpg) |
-
 ---
 
 ## 特性
