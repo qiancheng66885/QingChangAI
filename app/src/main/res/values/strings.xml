@@ -1,0 +1,20 @@
+<resources>
+    <string name="app_name">清畅AI</string>
+    <string name="new_chat">新建对话</string>
+    <string name="settings">设置</string>
+    <string name="api_config">API 配置</string>
+    <string name="data_management">数据管理</string>
+    <string name="about">关于</string>
+    <string name="send">发送</string>
+    <string name="stop">停止</string>
+    <string name="input_hint">输入消息…</string>
+    <string name="select_model">选择模型</string>
+    <string name="no_history">暂无历史对话</string>
+    <string name="what_can_i_help">有什么可以帮忙的？</string>
+    <string name="try_these">试试这些</string>
+    <string name="version">版本 1.0.0</string>
+    <string name="clear_cache">清除缓存</string>
+    <string name="cache_cleared">缓存已清除</string>
+    <string name="history_cleared">聊天记录已清除</string>
+    <string name="language_restart_hint">语言已切换，重启应用生效</string>
+</resources>
