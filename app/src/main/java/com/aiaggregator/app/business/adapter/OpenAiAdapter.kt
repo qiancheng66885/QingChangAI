@@ -47,7 +47,6 @@ class OpenAiAdapter : AiAdapter {
             if (request.extraParams["json_mode"] == "true") {
                 putJsonObject("response_format") { put("type", "json_object") }
             }
-            putJsonObject("stream_options") { put("include_usage", true) }
             putJsonArray("messages") {
                 request.messages.forEach { msg -> add(buildOpenAiMessage(msg)) }
             }
