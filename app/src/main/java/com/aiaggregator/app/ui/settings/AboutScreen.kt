@@ -8,6 +8,10 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import android.content.Intent
+import android.net.Uri
+import androidx.compose.foundation.clickable
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.size
@@ -81,6 +85,54 @@ fun AboutScreen() {
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
+            }
+        }
+
+        Spacer(Modifier.height(24.dp))
+
+        // 下载更新
+        val ctx = LocalContext.current
+        ElevatedCard(
+            Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(20.dp),
+            colors = CardDefaults.elevatedCardColors()
+        ) {
+            Column(Modifier.padding(20.dp)) {
+                Text("下载更新", style = MaterialTheme.typography.titleSmall)
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    "当前版本 1.0.0。新版本发布后可到以下开源地址下载最新安装包。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Spacer(Modifier.height(12.dp))
+                // GitHub
+                Surface(
+                    Modifier.fillMaxWidth().clickable {
+                        ctx.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://github.com/qiancheng66885/QingChangAI")))
+                    },
+                    shape = RoundedCornerShape(12.dp),
+                    color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
+                ) {
+                    Row(Modifier.padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Text("GitHub", style = MaterialTheme.typography.labelLarge, modifier = Modifier.weight(1f))
+                        Text("github.com/qiancheng66885/QingChangAI", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                }
+                Spacer(Modifier.height(8.dp))
+                // Gitee
+                Surface(
+                    Modifier.fillMaxWidth().clickable {
+                        ctx.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://gitee.com/qiancheng2025/QingChangAI")))
+                    },
+                    shape = RoundedCornerShape(12.dp),
+                    color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
+                ) {
+                    Row(Modifier.padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Text("Gitee", style = MaterialTheme.typography.labelLarge, modifier = Modifier.weight(1f))
+                        Text("gitee.com/qiancheng2025/QingChangAI", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                }
             }
         }
     }
