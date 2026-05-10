@@ -41,8 +41,8 @@ class SettingsStore(private val context: Context) {
                 ThemeMode.valueOf(prefs[Keys.THEME_MODE] ?: ThemeMode.SYSTEM.name)
             } catch (_: Exception) { ThemeMode.SYSTEM },
             language = try {
-                AppLanguage.valueOf(prefs[Keys.LANGUAGE] ?: AppLanguage.SYSTEM.name)
-            } catch (_: Exception) { AppLanguage.SYSTEM },
+                AppLanguage.valueOf(prefs[Keys.LANGUAGE] ?: AppLanguage.CHINESE.name)
+            } catch (_: Exception) { AppLanguage.CHINESE },
             autoCheckUpdate = prefs[Keys.AUTO_CHECK_UPDATE] ?: true,
             lastConfigEtag = prefs[Keys.LAST_CONFIG_ETAG],
             lastConfigFetchAt = prefs[Keys.LAST_CONFIG_FETCH_AT]

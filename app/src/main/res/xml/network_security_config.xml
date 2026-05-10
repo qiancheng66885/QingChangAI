@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<network-security-config>
+    <!-- 允许明文 HTTP 流量 — 用户可能连接局域网自建代理（Ollama / LocalAI / vLLM / One API 等） -->
+    <base-config cleartextTrafficPermitted="true">
+        <trust-anchors>
+            <!-- 信任系统预装 CA 证书 -->
+            <certificates src="system" />
+        </trust-anchors>
+    </base-config>
+</network-security-config>

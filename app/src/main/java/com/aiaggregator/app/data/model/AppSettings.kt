@@ -5,7 +5,7 @@ import kotlinx.serialization.Serializable
 @Serializable
 data class AppSettings(
     val themeMode: ThemeMode = ThemeMode.SYSTEM,
-    val language: AppLanguage = AppLanguage.SYSTEM,
+    val language: AppLanguage = AppLanguage.CHINESE,
     val autoCheckUpdate: Boolean = true,
     val lastConfigEtag: String? = null,
     val lastConfigFetchAt: Long? = null

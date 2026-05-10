@@ -1,6 +1,6 @@
 # 清畅AI — Android 多模型 AI 助手｜对接 ChatGPT Images 2.0 · DeepSeek · 第三方中转站
 
-清畅AI 是一款开源免费的 Android AI 聚合 App，可助用户对接各种大模型和热门模型。支持 OpenAI / Anthropic 兼容格式，可调用 ChatGPT 最新图像模型（ChatGPT Images 2.0 / gpt-image-1），以及 DeepSeek、通义千问、智谱、豆包、Kimi 等国产大模型。**支持对接第三方中转站**（One API / New API 等），一个 App 通吃所有模型。
+清畅AI 是一款开源免费的 Android AI 聚合 App，可助用户对接各种大模型和热门模型。支持 OpenAI / Anthropic 兼容格式，可调用 ChatGPT 最新图像模型（ChatGPT Images 2.0 / gpt-image-1.5），以及 DeepSeek、通义千问、智谱、豆包、Kimi 等国产大模型。**支持对接第三方中转站**（One API / New API 等），一个 App 通吃所有模型。
 
 **通过中转站 API 调用比开 Pro 会员便宜得多——生成一张图不到一毛钱，聊天几乎免费。**
 
@@ -26,7 +26,7 @@
 - Markdown 渲染（彩色标题、粗体、斜体、代码块、列表、引用、表格、待办、分隔线）
 
 ### 图片
-- 图片生成（ChatGPT Images 2.0 / gpt-image-1 / DALL·E 兼容）
+- 图片生成（ChatGPT Images 2.0 / gpt-image-1.5 / DALL·E 兼容）
 - 图片编辑（DALL·E 2 兼容）
 - 图片下载保存到相册
 - 图片全屏查看 + 双指缩放
@@ -65,7 +65,7 @@
 
 | 平台 | 聊天 | 识图 | 生图 |
 |------|:--:|:--:|:--:|
-| OpenAI（GPT-4o / gpt-image-1） | ✅ | ✅ | ✅ |
+| OpenAI（GPT-4o / gpt-image-1.5） | ✅ | ✅ | ✅ |
 | DeepSeek（V3 / R1） | ✅ | ❌ | ❌ |
 | Anthropic（Claude 3.5 / 4） | ✅ | ✅ | ❌ |
 | 通义千问（Qwen） | ✅ | ✅ | ❌ |

@@ -22,6 +22,7 @@ import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Brightness6
 import androidx.compose.material.icons.filled.DeleteOutline
 import androidx.compose.material.icons.filled.Info
+import androidx.compose.material.icons.filled.Support
 import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material3.ElevatedCard
 import androidx.compose.material3.CardDefaults
@@ -49,7 +50,7 @@ import kotlinx.coroutines.launch
 import java.util.Locale
 
 @Composable
-fun SettingsScreen(onNavConfig: () -> Unit, onNavData: () -> Unit, onNavAbout: () -> Unit) {
+fun SettingsScreen(onNavConfig: () -> Unit, onNavData: () -> Unit, onNavAbout: () -> Unit, onNavSupport: () -> Unit = {}) {
     val ctx = LocalContext.current
     val store = remember { SettingsStore(ctx) }
     val settings by store.settingsFlow.collectAsState(initial = null)
@@ -148,7 +149,9 @@ fun SettingsScreen(onNavConfig: () -> Unit, onNavData: () -> Unit, onNavAbout: (
                 HorizontalDivider(Modifier.padding(horizontal = 20.dp))
                 NavRow(Icons.Filled.DeleteOutline, t("数据管理", "Data"), t("清除缓存和聊天记录", "Clear cache & history")) { onNavData() }
                 HorizontalDivider(Modifier.padding(horizontal = 20.dp))
-                NavRow(Icons.Filled.Info, t("关于", "About"), t("版本 1.0.0", "Version 1.0.0")) { onNavAbout() }
+                NavRow(Icons.Filled.Support, t("软件支持与教程", "Support"), t("使用帮助和常见问题", "Help & FAQ")) { onNavSupport() }
+                HorizontalDivider(Modifier.padding(horizontal = 20.dp))
+                NavRow(Icons.Filled.Info, t("关于", "About"), "${t("版本", "Version")} ${UpdateChecker.getAppVersion()}") { onNavAbout() }
             }
         }
     }

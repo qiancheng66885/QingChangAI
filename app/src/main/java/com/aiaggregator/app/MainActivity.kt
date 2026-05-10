@@ -16,8 +16,10 @@ import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
+import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.LinearEasing
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.focusable
@@ -40,6 +42,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
@@ -144,10 +147,12 @@ import com.aiaggregator.app.ui.config.ConfigViewModel
 import com.aiaggregator.app.ui.settings.AboutScreen
 import com.aiaggregator.app.ui.settings.DataScreen
 import com.aiaggregator.app.ui.settings.SettingsScreen
+import com.aiaggregator.app.ui.settings.SupportScreen
 import com.aiaggregator.app.ui.theme.AiAggregatorTheme
 import kotlinx.coroutines.launch
 
-private enum class Screen { CHAT, SETTINGS, CONFIG, DATA, ABOUT }
+private enum class Screen { CHAT, SETTINGS, CONFIG, DATA, SUPPORT, ABOUT }
+private val testChatService by lazy { com.aiaggregator.app.business.chat.ChatService() }
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -167,7 +172,7 @@ fun MainApp() {
     val messages by chatVM.messages.collectAsState()
     val activeModel by chatVM.activeModel.collectAsState()
     var inputText by remember { mutableStateOf("") }
-    var attachedFile by remember { mutableStateOf<Uri?>(null) }
+    var attachedFiles by remember { mutableStateOf<List<Uri>>(emptyList()) }
     var editImage by remember { mutableStateOf(false) }
     var currentScreen by remember { mutableStateOf(Screen.CHAT) }
     val drawerState = rememberDrawerState(DrawerValue.Closed)
@@ -176,17 +181,25 @@ fun MainApp() {
     val kbController = LocalSoftwareKeyboardController.current
     val generating = messages.lastOrNull()?.status == MessageStatus.STREAMING
 
-    val filePicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
-        if (uri != null) attachedFile = uri
+    // Keep screen on while generating
+    val activity = ctx as? android.app.Activity
+    LaunchedEffect(generating) {
+        if (generating) activity?.window?.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        else activity?.window?.clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+    }
+
+    val filePicker = rememberLauncherForActivityResult(ActivityResultContracts.GetMultipleContents()) { uris ->
+        attachedFiles = attachedFiles + uris
     }
     val cameraLauncher = rememberLauncherForActivityResult(ActivityResultContracts.TakePicturePreview()) { bitmap ->
         if (bitmap != null) {
             val file = java.io.File(ctx.cacheDir, "photo_${System.currentTimeMillis()}.jpg")
             file.outputStream().use { bitmap.compress(android.graphics.Bitmap.CompressFormat.JPEG, 90, it) }
             // Use FileProvider to get a content:// URI that Coil and ContentResolver can both read
-            attachedFile = androidx.core.content.FileProvider.getUriForFile(
+            val photoUri = androidx.core.content.FileProvider.getUriForFile(
                 ctx, "${ctx.packageName}.fileprovider", file
             )
+            attachedFiles = attachedFiles + photoUri
         }
     }
 
@@ -259,6 +272,7 @@ fun MainApp() {
                                     Screen.SETTINGS -> "设置"
                                     Screen.CONFIG -> "API 配置"
                                     Screen.DATA -> "数据管理"
+                                    Screen.SUPPORT -> "软件支持与教程"
                                     Screen.ABOUT -> "关于"
                                     else -> ""
                                 }
@@ -278,7 +292,7 @@ fun MainApp() {
                             ChatView(messages, ctx, activeModel, onSuggestionClick = { inputText = it }, onRegenerate = { chatVM.regenerate() })
                         }
                         // Pre-send warning: image attached to non-vision model
-                        if (attachedFile != null && activeModel?.category != ModelCategory.IMAGE) {
+                        if (attachedFiles.isNotEmpty() && activeModel?.category != ModelCategory.IMAGE) {
                             Surface(Modifier.fillMaxWidth(), color = MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.6f)) {
                                 Text(
                                     "⚠️ 当前是文字模型，不支持图片识别。请切换到视觉模型或图片生成模型。",
@@ -290,7 +304,7 @@ fun MainApp() {
                         }
                         // Edit-image toggle for IMAGE models
                         val hasPrevImage = activeModel?.category == ModelCategory.IMAGE &&
-                            messages.lastOrNull { it.role == MessageRole.ASSISTANT && !it.imageUrl.isNullOrBlank() } != null
+                            messages.lastOrNull { it.role == MessageRole.ASSISTANT && it.allImageUrls.isNotEmpty() } != null
                         if (hasPrevImage) {
                             Row(Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 4.dp)) {
                                 ToggleChip(
@@ -308,12 +322,13 @@ fun MainApp() {
                             onSend = {
                                 kbController?.hide()
                                 if (inputText.isNotBlank()) {
-                                    chatVM.sendMessage(inputText, attachedFile, editImage = editImage)
-                                    inputText = ""; attachedFile = null; editImage = false
+                                    chatVM.sendMessage(inputText, attachedFiles, editImage = editImage)
+                                    inputText = ""; attachedFiles = emptyList(); editImage = false
                                 }
                             },
-                            generating = generating, attached = attachedFile,
-                            onClearFile = { attachedFile = null },
+                            generating = generating, attached = attachedFiles,
+                            onClearFile = { idx -> attachedFiles = attachedFiles.toMutableList().also { it.removeAt(idx) } },
+                            onClearAllFiles = { attachedFiles = emptyList() },
                             onPickFile = { filePicker.launch("image/*") },
                             onTakePhoto = {
                                 if (androidx.core.content.ContextCompat.checkSelfPermission(ctx, android.Manifest.permission.CAMERA) == android.content.pm.PackageManager.PERMISSION_GRANTED)
@@ -326,6 +341,7 @@ fun MainApp() {
                     Screen.SETTINGS -> SettingsScreen(
                         onNavConfig = { currentScreen = Screen.CONFIG },
                         onNavData = { currentScreen = Screen.DATA },
+                        onNavSupport = { currentScreen = Screen.SUPPORT },
                         onNavAbout = { currentScreen = Screen.ABOUT }
                     )
                     Screen.CONFIG -> ConfigScreen(
@@ -333,6 +349,7 @@ fun MainApp() {
                         onBack = { currentScreen = Screen.SETTINGS }
                     )
                     Screen.DATA -> DataScreen()
+                    Screen.SUPPORT -> SupportScreen()
                     Screen.ABOUT -> AboutScreen()
                 }
             }
@@ -449,83 +466,45 @@ private fun ChatBubble(msg: Message, prev: MessageRole?, next: MessageRole?, ctx
                 if (!isUser && streaming && msg.contentType == com.aiaggregator.app.data.model.ContentType.IMAGE) {
                     ImageShimmer()
                 }
-                if (!msg.imageUrl.isNullOrBlank()) {
+                val images = msg.allImageUrls
+                if (images.isNotEmpty()) {
                     var showFull by remember { mutableStateOf(false) }
-                    // Image card with rounded corners and shadow
-                    Surface(
-                        Modifier.widthIn(max = 300.dp).padding(6.dp),
-                        shape = RoundedCornerShape(14.dp),
-                        tonalElevation = 2.dp
-                    ) {
-                        Box {
-                            AsyncImage(
-                                model = msg.imageUrl,
-                                contentDescription = "生成的图片",
-                                modifier = Modifier.widthIn(max = 300.dp).clickable { showFull = true },
-                                placeholder = ColorPainter(MaterialTheme.colorScheme.surfaceVariant),
-                                error = ColorPainter(MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.2f))
+                    var fullIndex by remember { mutableStateOf(0) }
+                    if (isUser) {
+                        // ── User images: 九宫格 grid ──
+                        ImageGrid(
+                            images = images,
+                            modifier = Modifier.padding(4.dp),
+                            onImageClick = { idx -> fullIndex = idx; showFull = true },
+                            onDownload = { url -> saveImageToDevice(ctx, url) }
+                        )
+                    } else {
+                        // ── AI images: single full-width, or gallery for multiple ──
+                        if (images.size == 1) {
+                            AiImageCard(
+                                url = images[0],
+                                modifier = Modifier.padding(4.dp),
+                                onClick = { fullIndex = 0; showFull = true },
+                                onDownload = { saveImageToDevice(ctx, images[0]) }
                             )
-                            // Download button overlay
-                            Surface(
-                                Modifier.align(Alignment.BottomEnd).padding(8.dp),
-                                shape = RoundedCornerShape(8.dp),
-                                color = Color.Black.copy(alpha = 0.5f)
-                            ) {
-                                IconButton(
-                                    onClick = { saveImageToDevice(ctx, msg.imageUrl!!) },
-                                    modifier = Modifier.size(32.dp)
-                                ) {
-                                    Icon(Icons.Filled.Download, "保存", Modifier.size(16.dp), tint = Color.White)
-                                }
-                            }
+                        } else {
+                            ImageGallery(
+                                images = images,
+                                modifier = Modifier.padding(4.dp),
+                                onImageClick = { idx -> fullIndex = idx; showFull = true },
+                                onDownload = { url -> saveImageToDevice(ctx, url) }
+                            )
                         }
                     }
-                    // Fullscreen zoomable viewer
+                    // Fullscreen viewer with swipe
                     if (showFull) {
-                        var scale by remember { mutableStateOf(1f) }
-                        var offsetX by remember { mutableStateOf(0f) }
-                        var offsetY by remember { mutableStateOf(0f) }
-                        Dialog(
-                            onDismissRequest = { showFull = false },
-                            properties = DialogProperties(usePlatformDefaultWidth = false, decorFitsSystemWindows = false)
-                        ) {
-                            Box(Modifier.fillMaxSize().background(Color.Black)) {
-                                AsyncImage(
-                                    model = msg.imageUrl,
-                                    contentDescription = "全屏查看",
-                                    modifier = Modifier.fillMaxSize().pointerInput(Unit) {
-                                        detectTransformGestures { _, pan, zoom, _ ->
-                                            scale = (scale * zoom).coerceIn(1f, 5f)
-                                            offsetX += pan.x
-                                            offsetY += pan.y
-                                        }
-                                    }.graphicsLayer {
-                                        scaleX = scale; scaleY = scale
-                                        translationX = offsetX
-                                        translationY = offsetY
-                                    },
-                                    placeholder = ColorPainter(Color.DarkGray)
-                                )
-                                // Top bar: close + share + save
-                                Row(Modifier.align(Alignment.TopEnd).padding(top = 48.dp, end = 16.dp)) {
-                                    IconButton(onClick = {
-                                        shareContent(ctx, msg.imageUrl!!, true)
-                                    }) {
-                                        Icon(Icons.Filled.Share, "分享", tint = Color.White.copy(alpha = 0.9f), modifier = Modifier.size(24.dp))
-                                    }
-                                    Spacer(Modifier.width(4.dp))
-                                    IconButton(onClick = { saveImageToDevice(ctx, msg.imageUrl!!); Toast.makeText(ctx, "正在保存...", Toast.LENGTH_SHORT).show() }) {
-                                        Icon(Icons.Filled.Download, "保存", tint = Color.White.copy(alpha = 0.9f), modifier = Modifier.size(24.dp))
-                                    }
-                                    Spacer(Modifier.width(4.dp))
-                                    IconButton(onClick = { showFull = false }) {
-                                        Icon(Icons.Filled.Close, "关闭", tint = Color.White.copy(alpha = 0.9f), modifier = Modifier.size(24.dp))
-                                    }
-                                }
-                                // Double-tap to reset zoom
-                                Text("双击重置", Modifier.align(Alignment.BottomCenter).padding(bottom = 48.dp), style = MaterialTheme.typography.labelSmall, color = Color.White.copy(alpha = 0.4f))
-                            }
-                        }
+                        FullscreenImageViewer(
+                            images = images,
+                            initialIndex = fullIndex,
+                            onDismiss = { showFull = false },
+                            onDownload = { url -> saveImageToDevice(ctx, url); Toast.makeText(ctx, "正在保存...", Toast.LENGTH_SHORT).show() },
+                            onShare = { url -> shareContent(ctx, url, true) }
+                        )
                     }
                 }
                 if (msg.content.isNotBlank()) {
@@ -576,10 +555,10 @@ private fun ChatBubble(msg: Message, prev: MessageRole?, next: MessageRole?, ctx
                                 Icon(Icons.Filled.Refresh, "重新生成", Modifier.size(14.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
                             }
                         }
-                        IconButton(onClick = { shareContent(ctx, msg.imageUrl ?: msg.content, msg.imageUrl != null) }, modifier = Modifier.size(28.dp)) {
+                        IconButton(onClick = { shareContent(ctx, msg.allImageUrls.firstOrNull() ?: msg.content, msg.allImageUrls.isNotEmpty()) }, modifier = Modifier.size(28.dp)) {
                             Icon(Icons.Filled.Share, "分享", Modifier.size(14.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
                         }
-                        IconButton(onClick = { copyText(ctx, msg.imageUrl ?: msg.content) }, modifier = Modifier.size(28.dp)) {
+                        IconButton(onClick = { copyText(ctx, msg.allImageUrls.firstOrNull() ?: msg.content) }, modifier = Modifier.size(28.dp)) {
                             Icon(Icons.Filled.ContentCopy, "复制", Modifier.size(14.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
                         }
                     }
@@ -591,6 +570,19 @@ private fun ChatBubble(msg: Message, prev: MessageRole?, next: MessageRole?, ctx
 
 @Composable
 private fun ImageShimmer() {
+    val hints = remember { listOf(
+        "构思画面中...", "正在细化细节...", "调整色彩与光影...",
+        "渲染中，请稍候...", "优化画面构图...", "快完成了..."
+    )}
+    val hintIndex by rememberInfiniteTransition().animateFloat(
+        initialValue = 0f, targetValue = (hints.size - 1).toFloat(),
+        animationSpec = infiniteRepeatable(
+            animation = tween(hints.size * 3500, easing = LinearEasing),
+            repeatMode = RepeatMode.Restart
+        )
+    )
+    val displayHint = hints[hintIndex.toInt().coerceIn(0, hints.size - 1)]
+
     val infinite = rememberInfiniteTransition()
     val shimmerX by infinite.animateFloat(
         initialValue = -200f, targetValue = 500f,
@@ -608,12 +600,249 @@ private fun ImageShimmer() {
         start = androidx.compose.ui.geometry.Offset(shimmerX, 0f),
         end = androidx.compose.ui.geometry.Offset(shimmerX + 200f, 0f)
     )
-    Box(
-        Modifier.widthIn(max = 300.dp)
-            .height(200.dp)
-            .padding(8.dp)
-            .background(brush, RoundedCornerShape(12.dp))
+    // Pseudo progress bar — fills to 70% over 12s, then resets
+    val progressAnim by infinite.animateFloat(
+        initialValue = 0f, targetValue = 0.7f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(12000, easing = LinearEasing),
+            repeatMode = RepeatMode.Restart
+        )
     )
+    Surface(
+        Modifier.widthIn(max = 300.dp).padding(4.dp),
+        shape = RoundedCornerShape(16.dp),
+        tonalElevation = 2.dp,
+        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f)
+    ) {
+        Column(Modifier.padding(12.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+            // Shimmer placeholder matching output dimensions
+            Box(
+                Modifier.fillMaxWidth().height(180.dp)
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(brush)
+            )
+            Spacer(Modifier.height(12.dp))
+            // Progress bar
+            LinearProgressIndicator(
+                progress = { progressAnim },
+                modifier = Modifier.fillMaxWidth().height(4.dp).clip(RoundedCornerShape(2.dp)),
+                color = MaterialTheme.colorScheme.primary.copy(alpha = 0.6f),
+                trackColor = MaterialTheme.colorScheme.surfaceVariant,
+            )
+            Spacer(Modifier.height(8.dp))
+            // Rotating hint text with fade
+            AnimatedContent(displayHint, Modifier.fillMaxWidth()) { text ->
+                Text(text, style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
+                    modifier = Modifier.fillMaxWidth(),
+                    textAlign = androidx.compose.ui.text.style.TextAlign.Center)
+            }
+        }
+    }
+}
+
+// ── Attachment thumbnail for input preview ──
+
+@Composable
+private fun AttachmentThumb(uri: Uri, onRemove: () -> Unit) {
+    Box(Modifier.size(56.dp).clip(RoundedCornerShape(12.dp))) {
+        AsyncImage(
+            model = uri, contentDescription = "预览",
+            modifier = Modifier.fillMaxSize(),
+            placeholder = ColorPainter(MaterialTheme.colorScheme.surfaceVariant),
+            error = ColorPainter(MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.2f))
+        )
+        // × remove button
+        Box(
+            Modifier.align(Alignment.TopEnd).size(18.dp)
+                .background(Color.Black.copy(alpha = 0.6f), RoundedCornerShape(bottomStart = 8.dp))
+                .clickable { onRemove() },
+            contentAlignment = Alignment.Center
+        ) {
+            Icon(Icons.Filled.Close, "移除", Modifier.size(12.dp), tint = Color.White)
+        }
+    }
+}
+
+// ── User image grid (九宫格, WeChat style) ──
+
+@Composable
+private fun ImageGrid(images: List<String>, modifier: Modifier = Modifier, onImageClick: (Int) -> Unit, onDownload: (String) -> Unit) {
+    val n = images.size
+    val cellSize = 80.dp
+    val gap = 4.dp
+    val columns = when { n == 1 -> 1; n == 2 -> 2; n == 3 -> 3; n == 4 -> 2; else -> 3 }
+    val width = cellSize * columns + gap * (columns - 1)
+    Column(modifier.width(width)) {
+        val rows = images.chunked(columns)
+        rows.forEach { rowImages ->
+            Row(horizontalArrangement = Arrangement.spacedBy(gap)) {
+                rowImages.forEachIndexed { idx, url ->
+                    val globalIdx = images.indexOf(url)
+                    Box(Modifier.size(cellSize).clip(RoundedCornerShape(8.dp))) {
+                        AsyncImage(
+                            model = url, contentDescription = "图片 $globalIdx",
+                            modifier = Modifier.fillMaxSize().clickable { onImageClick(globalIdx) },
+                            placeholder = ColorPainter(MaterialTheme.colorScheme.surfaceVariant),
+                            error = ColorPainter(MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.2f))
+                        )
+                    }
+                }
+                // Fill empty slots
+                repeat(columns - rowImages.size) {
+                    Spacer(Modifier.size(cellSize))
+                }
+                Spacer(Modifier.height(gap))
+            }
+        }
+    }
+}
+
+// ── AI single image card (full-width) ──
+
+@Composable
+private fun AiImageCard(url: String, modifier: Modifier = Modifier, onClick: () -> Unit, onDownload: () -> Unit) {
+    Surface(
+        modifier.widthIn(max = 300.dp),
+        shape = RoundedCornerShape(14.dp),
+        tonalElevation = 2.dp
+    ) {
+        Box {
+            AsyncImage(
+                model = url, contentDescription = "生成的图片",
+                modifier = Modifier.widthIn(max = 300.dp).clickable { onClick() },
+                placeholder = ColorPainter(MaterialTheme.colorScheme.surfaceVariant),
+                error = ColorPainter(MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.2f))
+            )
+            Box(
+                Modifier.align(Alignment.BottomEnd).padding(8.dp)
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(Color.Black.copy(alpha = 0.5f))
+                    .clickable { onDownload() }
+                    .padding(4.dp)
+            ) {
+                Icon(Icons.Filled.Download, "保存", Modifier.size(24.dp), tint = Color.White)
+            }
+        }
+    }
+}
+
+// ── AI image gallery (LazyRow with peek) ──
+
+@Composable
+private fun ImageGallery(images: List<String>, modifier: Modifier = Modifier, onImageClick: (Int) -> Unit, onDownload: (String) -> Unit) {
+    val peekWidth = 32.dp
+    LazyRow(
+        modifier.widthIn(max = 320.dp),
+        contentPadding = PaddingValues(horizontal = 6.dp),
+        horizontalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        items(images.size) { idx ->
+            val url = images[idx]
+            Surface(
+                Modifier.width(140.dp),
+                shape = RoundedCornerShape(12.dp),
+                tonalElevation = 2.dp
+            ) {
+                Box {
+                    AsyncImage(
+                        model = url, contentDescription = "图片 $idx",
+                        modifier = Modifier.width(140.dp).height(140.dp).clickable { onImageClick(idx) },
+                        placeholder = ColorPainter(MaterialTheme.colorScheme.surfaceVariant),
+                        error = ColorPainter(MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.2f))
+                    )
+                    // Download button overlay
+                    Surface(
+                        Modifier.align(Alignment.BottomEnd).padding(4.dp),
+                        shape = RoundedCornerShape(6.dp),
+                        color = Color.Black.copy(alpha = 0.5f)
+                    ) {
+                        IconButton(onClick = { onDownload(url) }, modifier = Modifier.size(26.dp)) {
+                            Icon(Icons.Filled.Download, "保存", Modifier.size(12.dp), tint = Color.White)
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// ── Fullscreen viewer with swipe ──
+
+@Composable
+private fun FullscreenImageViewer(images: List<String>, initialIndex: Int, onDismiss: () -> Unit, onDownload: (String) -> Unit, onShare: (String) -> Unit) {
+    var currentIndex by remember { mutableStateOf(initialIndex) }
+    var scale by remember { mutableStateOf(1f) }
+    var offsetX by remember { mutableStateOf(0f) }
+    var offsetY by remember { mutableStateOf(0f) }
+    Dialog(
+        onDismissRequest = onDismiss,
+        properties = DialogProperties(usePlatformDefaultWidth = false, decorFitsSystemWindows = false)
+    ) {
+        Box(Modifier.fillMaxSize().background(Color.Black)) {
+            val currentUrl = images.getOrNull(currentIndex) ?: return@Box
+            AsyncImage(
+                model = currentUrl, contentDescription = "全屏查看",
+                modifier = Modifier.fillMaxSize().pointerInput(Unit) {
+                    detectTransformGestures { _, pan, zoom, _ ->
+                        scale = (scale * zoom).coerceIn(1f, 5f)
+                        offsetX += pan.x
+                        offsetY += pan.y
+                    }
+                }.graphicsLayer {
+                    scaleX = scale; scaleY = scale
+                    translationX = offsetX; translationY = offsetY
+                }.clickable { onDismiss() },
+                placeholder = ColorPainter(Color.DarkGray)
+            )
+            // Top bar
+            Row(Modifier.align(Alignment.TopEnd).padding(top = 48.dp, end = 16.dp)) {
+                // Page indicator
+                if (images.size > 1) {
+                    Text("${currentIndex + 1}/${images.size}",
+                        Modifier.align(Alignment.CenterVertically).padding(end = 12.dp),
+                        style = MaterialTheme.typography.labelMedium,
+                        color = Color.White.copy(alpha = 0.7f))
+                }
+                IconButton(onClick = { onShare(currentUrl) }) {
+                    Icon(Icons.Filled.Share, "分享", tint = Color.White.copy(alpha = 0.9f), modifier = Modifier.size(24.dp))
+                }
+                Spacer(Modifier.width(4.dp))
+                IconButton(onClick = { onDownload(currentUrl) }) {
+                    Icon(Icons.Filled.Download, "保存", tint = Color.White.copy(alpha = 0.9f), modifier = Modifier.size(24.dp))
+                }
+                Spacer(Modifier.width(4.dp))
+                IconButton(onClick = onDismiss) {
+                    Icon(Icons.Filled.Close, "关闭", tint = Color.White.copy(alpha = 0.9f), modifier = Modifier.size(24.dp))
+                }
+            }
+            // Prev / Next arrows
+            if (images.size > 1) {
+                if (currentIndex > 0) {
+                    Box(
+                        Modifier.align(Alignment.CenterStart).padding(start = 8.dp)
+                            .size(36.dp).clip(RoundedCornerShape(20.dp))
+                            .background(Color.White.copy(alpha = 0.2f))
+                            .clickable { currentIndex--; scale = 1f; offsetX = 0f; offsetY = 0f },
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, "上一张", Modifier.size(20.dp), tint = Color.White)
+                    }
+                }
+                if (currentIndex < images.size - 1) {
+                    Box(
+                        Modifier.align(Alignment.CenterEnd).padding(end = 8.dp)
+                            .size(36.dp).clip(RoundedCornerShape(20.dp))
+                            .background(Color.White.copy(alpha = 0.2f))
+                            .clickable { currentIndex++; scale = 1f; offsetX = 0f; offsetY = 0f },
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(Icons.AutoMirrored.Filled.Send, "下一张", Modifier.size(20.dp), tint = Color.White)
+                    }
+                }
+            }
+        }
+    }
 }
 
 @Composable
@@ -799,19 +1028,36 @@ private fun AnnotatedString.Builder.appendInlineStyles(text: String) {
     }
 }
 
+private fun detectImageExt(url: String, bytes: ByteArray): String {
+    // Check URL extension first
+    val lower = url.lowercase()
+    if (lower.contains(".jpg") || lower.contains(".jpeg")) return "jpg"
+    if (lower.contains(".webp")) return "webp"
+    if (lower.contains(".png")) return "png"
+    // Check magic bytes
+    if (bytes.size >= 3 && bytes[0] == 0xFF.toByte() && bytes[1] == 0xD8.toByte()) return "jpg"
+    if (bytes.size >= 4 && bytes[0] == 0x52.toByte() && bytes[1] == 0x49.toByte()) return "webp"
+    return "png"
+}
+
 private fun saveImageToDevice(ctx: Context, imageUrl: String) {
     kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).launch {
         try {
-            val client = com.aiaggregator.app.data.remote.HttpClientFactory.create()
-            val request = okhttp3.Request.Builder().url(imageUrl).build()
-            val response = client.newCall(request).execute()
-            val bytes = response.body?.bytes() ?: return@launch
-            val fileName = "AI_${System.currentTimeMillis()}.png"
+            val bytes = if (imageUrl.startsWith("file://")) {
+                java.io.File(java.net.URI(imageUrl)).readBytes()
+            } else {
+                val client = com.aiaggregator.app.data.remote.HttpClientFactory.client
+                val request = okhttp3.Request.Builder().url(imageUrl).build()
+                client.newCall(request).execute().body?.bytes() ?: return@launch
+            }
+            val ext = detectImageExt(imageUrl, bytes)
+            val mimeType = when (ext) { "jpg" -> "image/jpeg"; "webp" -> "image/webp"; else -> "image/png" }
+            val fileName = "AI_${System.currentTimeMillis()}.$ext"
 
             if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q) {
                 val values = android.content.ContentValues().apply {
                     put(android.provider.MediaStore.Images.Media.DISPLAY_NAME, fileName)
-                    put(android.provider.MediaStore.Images.Media.MIME_TYPE, "image/png")
+                    put(android.provider.MediaStore.Images.Media.MIME_TYPE, mimeType)
                     put(android.provider.MediaStore.Images.Media.RELATIVE_PATH, android.os.Environment.DIRECTORY_PICTURES + "/清畅AI")
                     put(android.provider.MediaStore.Images.Media.IS_PENDING, 1)
                 }
@@ -854,8 +1100,9 @@ private fun InputArea(
     onTextChange: (String) -> Unit,
     onSend: () -> Unit,
     generating: Boolean,
-    attached: Uri?,
-    onClearFile: () -> Unit,
+    attached: List<Uri>,
+    onClearFile: (Int) -> Unit,
+    onClearAllFiles: () -> Unit,
     onPickFile: () -> Unit,
     onTakePhoto: () -> Unit,
     onStop: () -> Unit
@@ -905,28 +1152,27 @@ private fun InputArea(
                 }
                 Spacer(Modifier.weight(1f))
 
-                // File attachment preview (shown above model row when attached)
-                if (attached != null) {
-                    val ctx = LocalContext.current
-                    val mimeType = remember(attached) { ctx.contentResolver.getType(attached) ?: "" }
-                    val isImage = mimeType.startsWith("image/")
-                    Surface(
-                        Modifier.fillMaxWidth().padding(bottom = 6.dp),
-                        shape = RoundedCornerShape(12.dp),
-                        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.7f)
+                // Multi-file attachment preview — LazyRow
+                if (attached.isNotEmpty()) {
+                    LazyRow(
+                        Modifier.fillMaxWidth().padding(bottom = 4.dp),
+                        contentPadding = PaddingValues(horizontal = 12.dp),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
-                        Row(Modifier.padding(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                            if (isImage) {
-                                AsyncImage(
-                                    model = attached,
-                                    contentDescription = "预览",
-                                    modifier = Modifier.size(40.dp).padding(end = 8.dp)
-                                )
-                            }
-                            Text("📎 已选择文件", style = MaterialTheme.typography.labelSmall)
-                            Spacer(Modifier.weight(1f))
-                            TextButton(onClick = onClearFile, contentPadding = PaddingValues(0.dp)) {
-                                Text("× 移除", style = MaterialTheme.typography.labelSmall)
+                        items(attached.size, key = { attached[it] }) { idx ->
+                            val uri = attached[idx]
+                            AttachmentThumb(uri = uri, onRemove = { onClearFile(idx) })
+                        }
+                        item {
+                            Surface(
+                                Modifier.size(56.dp).clickable { onPickFile() },
+                                shape = RoundedCornerShape(12.dp),
+                                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+                                border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.3f))
+                            ) {
+                                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                                    Icon(Icons.Filled.Add, "添加", Modifier.size(20.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                                }
                             }
                         }
                     }
@@ -1240,7 +1486,7 @@ private fun ConfigScreen(vm: ConfigViewModel, onBack: () -> Unit) {
                                 testing = true
                                 scope.launch {
                                     val result = withContext(Dispatchers.IO) {
-                                        com.aiaggregator.app.business.chat.ChatService().syncChat(
+                                        testChatService.syncChat(
                                             listOf(com.aiaggregator.app.business.adapter.ChatMessageItem("user", "hi")), p, m.modelName
                                         )
                                     }
@@ -1304,7 +1550,7 @@ private fun ConfigScreen(vm: ConfigViewModel, onBack: () -> Unit) {
                 color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.4f)
             ) {
                 Text(
-                    "💡 本平台兼容 OpenAI 格式与 Anthropic 格式，支持这两种格式的模型厂商（如 DeepSeek、豆包、通义千问、Moonshot、零一万物、智谱等）或第三方中转站，均可接入使用。",
+                    "💡 绝大多数厂商都支持 OpenAI 兼容格式（如 DeepSeek、通义千问、智谱、豆包、Moonshot 等），第三方中转平台（如 One API、New API 等）同样兼容。通常只需填写平台提供的 API 地址、密钥和模型名称，选择 OpenAI 兼容格式即可使用。",
                     Modifier.padding(12.dp),
                     style = MaterialTheme.typography.labelMedium,
                     color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.8f)
@@ -1334,7 +1580,7 @@ private fun ConfigScreen(vm: ConfigViewModel, onBack: () -> Unit) {
             Spacer(Modifier.height(12.dp))
             OutlinedTextField(url, { url = it }, label = { Text("API 地址") }, modifier = Modifier.fillMaxWidth(), singleLine = true)
             Spacer(Modifier.height(12.dp))
-            OutlinedTextField(mn, { mn = it }, label = { Text("模型名 (API用)") }, modifier = Modifier.fillMaxWidth(), singleLine = true, placeholder = { Text("gpt-4o / gpt-image-1") })
+            OutlinedTextField(mn, { mn = it }, label = { Text("模型名 (API用)") }, modifier = Modifier.fillMaxWidth(), singleLine = true, placeholder = { Text("gpt-4o / gpt-image-2.0") })
             Spacer(Modifier.height(12.dp))
             OutlinedTextField(dn, { dn = it }, label = { Text("显示名称 (可选)") }, modifier = Modifier.fillMaxWidth(), singleLine = true, placeholder = { Text("如: GPT-4o 工作用") })
             Spacer(Modifier.height(12.dp))

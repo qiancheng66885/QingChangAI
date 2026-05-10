@@ -10,6 +10,7 @@ import com.aiaggregator.app.business.adapter.ImageGenAdapter
 import com.aiaggregator.app.business.adapter.ImageEditRequest
 import com.aiaggregator.app.business.adapter.ImageGenRequest
 import com.aiaggregator.app.business.adapter.ImageGenResult
+import com.aiaggregator.app.business.adapter.ImagePart
 import com.aiaggregator.app.business.adapter.OpenAiAdapter
 import com.aiaggregator.app.business.adapter.OpenAiImageGenAdapter
 import com.aiaggregator.app.data.model.ApiConfig
@@ -36,6 +37,6 @@ class ChatService {
     suspend fun generateImage(prompt: String, modelName: String, cfg: ApiConfig): ImageGenResult =
         imageGenAdapter.generate(ImageGenRequest(model = modelName, prompt = prompt), cfg)
 
-    suspend fun editImage(prompt: String, modelName: String, imageBytes: ByteArray, cfg: ApiConfig): ImageGenResult =
-        imageGenAdapter.edit(ImageEditRequest(model = modelName, prompt = prompt, imageBytes = imageBytes), cfg)
+    suspend fun editImage(prompt: String, modelName: String, images: List<ImagePart>, cfg: ApiConfig): ImageGenResult =
+        imageGenAdapter.edit(ImageEditRequest(model = modelName, prompt = prompt, images = images), cfg)
 }

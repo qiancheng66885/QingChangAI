@@ -11,7 +11,9 @@ data class Message(
     val sessionId: String,
     val role: MessageRole,
     val content: String,
-    val imageUrl: String? = null,
+    @Deprecated("Migrated to imageUrls", ReplaceWith("imageUrls"))
+    val imageUrl: String? = null,       // ← 旧数据兼容，读取后迁移至 imageUrls
+    val imageUrls: List<String> = emptyList(),
     val contentType: ContentType = ContentType.TEXT,
     val assetIds: List<String> = emptyList(),
     val parentMessageId: String? = null,
@@ -23,7 +25,12 @@ data class Message(
     val modelName: String? = null,
     val errorMessage: String? = null,
     val metadata: String? = null
-)
+) {
+    /** 合并新旧字段，优先取 imageUrls */
+    val allImageUrls: List<String>
+        get() = if (imageUrls.isNotEmpty()) imageUrls
+                else imageUrl?.let { listOf(it) } ?: emptyList()
+}
 
 @Serializable
 enum class MessageRole {

@@ -12,12 +12,11 @@ import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.MultipartBody
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
-import okhttp3.Response
 import java.io.IOException
 
 class OpenAiImageGenAdapter : ImageGenAdapter {
 
-    private val client = HttpClientFactory.create()
+    private val client = HttpClientFactory.client
     private val json = Json { ignoreUnknownKeys = true }
 
     override suspend fun generate(request: ImageGenRequest, config: ApiConfig): ImageGenResult {
@@ -27,6 +26,12 @@ class OpenAiImageGenAdapter : ImageGenAdapter {
             put("n", request.n)
             put("size", request.size)
             put("quality", request.quality)
+            request.outputFormat?.let { put("output_format", it) }
+            request.background?.let { put("background", it) }
+            request.moderation?.let { put("moderation", it) }
+            request.outputCompression?.let { put("output_compression", it) }
+            request.seed?.let { put("seed", it) }
+            request.thinking?.let { put("thinking", it) }
         }
 
         val httpRequest = Request.Builder()
@@ -40,22 +45,37 @@ class OpenAiImageGenAdapter : ImageGenAdapter {
     }
 
     override suspend fun edit(request: ImageEditRequest, config: ApiConfig): ImageGenResult {
-        val multipart = MultipartBody.Builder()
-            .setType(MultipartBody.FORM)
-            .addFormDataPart("model", request.model)
-            .addFormDataPart("prompt", request.prompt)
-            .addFormDataPart("n", request.n.toString())
-            .addFormDataPart("size", request.size)
-            .addFormDataPart(
-                "image", "image.png",
-                request.imageBytes.toRequestBody("image/png".toMediaType())
+        val builder = MultipartBody.Builder().setType(MultipartBody.FORM)
+
+        builder.addFormDataPart("model", request.model)
+        builder.addFormDataPart("prompt", request.prompt)
+        builder.addFormDataPart("n", request.n.toString())
+        builder.addFormDataPart("size", request.size)
+        request.outputFormat?.let { builder.addFormDataPart("output_format", it) }
+        request.background?.let { builder.addFormDataPart("background", it) }
+        request.moderation?.let { builder.addFormDataPart("moderation", it) }
+        request.outputCompression?.let { builder.addFormDataPart("output_compression", it.toString()) }
+        request.seed?.let { builder.addFormDataPart("seed", it.toString()) }
+        request.thinking?.let { builder.addFormDataPart("thinking", it) }
+        request.inputFidelity?.let { builder.addFormDataPart("input_fidelity", it) }
+
+        request.images.forEachIndexed { idx, img ->
+            val ext = when {
+                img.mimeType.contains("png") -> "png"
+                img.mimeType.contains("webp") -> "webp"
+                img.mimeType.contains("gif") -> "gif"
+                else -> "jpg"
+            }
+            builder.addFormDataPart(
+                "image", "image_${idx}.$ext",
+                img.bytes.toRequestBody(img.mimeType.toMediaType())
             )
-            .build()
+        }
 
         val httpRequest = Request.Builder()
             .url("${config.baseUrl.trimEnd('/').removeSuffix("/v1")}/v1/images/edits")
             .header("Authorization", "Bearer ${config.apiKey}")
-            .post(multipart)
+            .post(builder.build())
             .build()
 
         return executeRequest(httpRequest)
@@ -66,36 +86,25 @@ class OpenAiImageGenAdapter : ImageGenAdapter {
             val response = client.newCall(httpRequest).execute()
             val respBody = response.body?.string() ?: ""
             if (!response.isSuccessful) {
-                return ImageGenResult(error = "HTTP ${response.code}: ${errorBodySummary(respBody)}")
+                return ImageGenResult(error = "HTTP ${response.code}: ${AdapterUtils.errorBodySummary(respBody)}")
             }
-            validateJsonContentType(response)
+            AdapterUtils.validateJsonContentType(response)
             val obj = json.parseToJsonElement(respBody).jsonObject
-            val urls = obj["data"]?.jsonArray?.map {
-                it.jsonObject["url"]?.jsonPrimitive?.content ?: ""
-            } ?: emptyList()
-            ImageGenResult(urls = urls)
-        } catch (e: IOException) {
-            ImageGenResult(error = "网络错误: ${e.message}")
-        } catch (e: Exception) {
-            val detail = if (e.message?.contains("JSON") == true) {
-                "服务返回了非 JSON 内容，可能是代理或节点错误: ${e.message}"
-            } else {
-                e.message ?: "未知错误"
+            val dataArray = obj["data"]?.jsonArray
+            val urls = mutableListOf<String>()
+            val base64List = mutableListOf<String>()
+            if (dataArray != null) {
+                for (item in dataArray) {
+                    val it = item.jsonObject
+                    it["url"]?.jsonPrimitive?.content?.let { u -> if (u.isNotBlank()) urls.add(u) }
+                    it["b64_json"]?.jsonPrimitive?.content?.let { b -> if (b.isNotBlank()) base64List.add(b) }
+                }
             }
-            ImageGenResult(error = "请求失败: $detail")
+            ImageGenResult(urls = urls, base64Images = base64List)
+        } catch (e: IOException) {
+            ImageGenResult(error = e.message ?: "网络连接失败")
+        } catch (e: Exception) {
+            ImageGenResult(error = e.message ?: "未知错误")
         }
-    }
-
-    private fun validateJsonContentType(response: Response) {
-        val ct = response.body?.contentType()
-        if (ct != null && (ct.type != "application" || ct.subtype != "json")) {
-            val url = response.request.url.toString()
-            val preview = response.peekBody(500).string()
-            throw IOException("服务器返回了非 JSON 内容 (${ct.type}/${ct.subtype})，请检查 API 地址是否正确。请求 URL: $url，响应预览: $preview")
-        }
-    }
-
-    private fun errorBodySummary(body: String): String {
-        return if (body.length > 200) body.take(200) + "..." else body
     }
 }

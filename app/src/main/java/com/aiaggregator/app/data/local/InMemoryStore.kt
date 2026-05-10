@@ -4,22 +4,26 @@ import android.content.Context
 import android.util.Log
 import com.aiaggregator.app.data.model.Message
 import com.aiaggregator.app.data.model.Session
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.GlobalScope
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 
-/**
- * 混合存储 — MutableStateFlow 即时 UI + JSON 文件磁盘持久化。
- * 避免 Room 注解处理器兼容性问题，直接用 kotlinx.serialization 序列化到文件。
- */
 object InMemoryStore {
 
     private val _sessions = MutableStateFlow<List<Session>>(emptyList())
     private val _messages = MutableStateFlow<List<Message>>(emptyList())
     private var ctx: Context? = null
     private val json = Json { ignoreUnknownKeys = true; encodeDefaults = true }
+    private val fileMutex = Mutex()
+    @Volatile private var lastMessagesSaveMs: Long = 0L
 
     fun initialize(context: Context) {
         if (ctx != null) return
@@ -32,30 +36,32 @@ object InMemoryStore {
     // === Session ===
 
     suspend fun insertSession(session: Session) {
-        _sessions.value = _sessions.value + session
+        _sessions.update { it + session }
         saveSessionsSync()
     }
 
-    fun getAllSessions(): Flow<List<Session>> = _sessions
+    fun getAllSessions(): Flow<List<Session>> = _sessions.map { list ->
+        list.sortedByDescending { it.lastActiveAt }
+    }
 
     suspend fun getSession(sessionId: String): Session? =
         _sessions.value.find { it.id == sessionId }
 
     suspend fun deleteSession(sessionId: String) {
-        _sessions.value = _sessions.value.filter { it.id != sessionId }
-        _messages.value = _messages.value.filter { it.sessionId != sessionId }
+        _sessions.update { list -> list.filter { it.id != sessionId } }
+        _messages.update { list -> list.filter { it.sessionId != sessionId } }
         saveSessionsSync()
         saveMessagesSync()
     }
 
     suspend fun updateSessionTitle(sessionId: String, title: String) {
-        _sessions.value = _sessions.value.map { if (it.id == sessionId) it.copy(title = title) else it }
+        _sessions.update { list -> list.map { if (it.id == sessionId) it.copy(title = title) else it } }
         saveSessionsSync()
     }
 
     suspend fun updateSessionActivity(sessionId: String, timestamp: Long) {
-        _sessions.value = _sessions.value.map {
-            if (it.id == sessionId) it.copy(lastActiveAt = timestamp, messageCount = it.messageCount + 1) else it
+        _sessions.update { list ->
+            list.map { if (it.id == sessionId) it.copy(lastActiveAt = timestamp, messageCount = it.messageCount + 1) else it }
         }
         saveSessionsSync()
     }
@@ -63,19 +69,27 @@ object InMemoryStore {
     // === Message ===
 
     fun insertMessage(message: Message) {
-        val list = _messages.value.toMutableList()
-        val idx = list.indexOfFirst { it.id == message.id }
-        if (idx >= 0) list[idx] = message else list.add(message)
-        _messages.value = list
-        // Persist on background thread — StateFlow update is instant
-        Thread { saveMessagesSync() }.start()
+        _messages.update { list ->
+            val mutable = list.toMutableList()
+            val idx = mutable.indexOfFirst { it.id == message.id }
+            if (idx >= 0) mutable[idx] = message else mutable.add(message)
+            mutable
+        }
+        // Debounced save: at most once per 500ms to avoid thrashing during streaming
+        val now = System.currentTimeMillis()
+        if (now - lastMessagesSaveMs > 500) {
+            lastMessagesSaveMs = now
+            GlobalScope.launch(Dispatchers.IO) {
+                fileMutex.withLock { saveMessagesSync() }
+            }
+        }
     }
 
     fun getMessagesBySession(sessionId: String): Flow<List<Message>> =
         _messages.map { list -> list.filter { it.sessionId == sessionId }.sortedBy { it.timestamp } }
 
     suspend fun deleteMessagesBySession(sessionId: String) {
-        _messages.value = _messages.value.filter { it.sessionId != sessionId }
+        _messages.update { list -> list.filter { it.sessionId != sessionId } }
         saveMessagesSync()
     }
 
@@ -104,9 +118,8 @@ object InMemoryStore {
         return toDelete.size
     }
 
-    fun countNewerThan(timestamp: Long): Int {
-        return _sessions.value.count { it.createdAt >= timestamp }
-    }
+    fun countNewerThan(timestamp: Long): Int =
+        _sessions.value.count { it.createdAt >= timestamp }
 
     fun countOlderThan(timestamp: Long): Int {
         val oldMsgs = _messages.value.filter { it.timestamp < timestamp }
@@ -117,7 +130,14 @@ object InMemoryStore {
         return oldMsgs.size + orphans.size
     }
 
-    // === File I/O (synchronous — data is small, IO is fast) ===
+    /**
+     * Flush pending message saves immediately. Call before app goes to background.
+     */
+    fun flushMessages() {
+        saveMessagesSync()
+    }
+
+    // === File I/O ===
 
     private fun saveSessionsSync() {
         ctx?.let { c ->
@@ -126,7 +146,7 @@ object InMemoryStore {
                 file.parentFile?.mkdirs()
                 java.io.FileOutputStream(file).use { fos ->
                     fos.write(json.encodeToString(_sessions.value).toByteArray())
-                    fos.fd.sync() // force to disk
+                    fos.fd.sync()
                 }
             } catch (e: Exception) { Log.e("InMemoryStore", "saveSessions failed", e) }
         }
@@ -142,9 +162,8 @@ object InMemoryStore {
                     fos.write(data.toByteArray())
                     fos.fd.sync()
                 }
-                Log.d("InMemoryStore", "Saved ${_messages.value.size} msgs (${data.length} bytes)")
             } catch (e: Exception) { Log.e("InMemoryStore", "saveMessages failed", e) }
-        } ?: Log.e("InMemoryStore", "saveMessages: ctx is null!")
+        }
     }
 
     private inline fun <reified T> loadFromFileSync(name: String): List<T>? {
@@ -155,5 +174,4 @@ object InMemoryStore {
             } else null
         } catch (e: Exception) { Log.e("InMemoryStore", "loadSync $name failed", e); null }
     }
-
 }

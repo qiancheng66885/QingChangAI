@@ -4,6 +4,8 @@ import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.aiaggregator.app.business.adapter.ChatMessageItem
+import com.aiaggregator.app.business.adapter.ImagePart
+import com.aiaggregator.app.business.adapter.ImageGenResult
 import com.aiaggregator.app.business.chat.ChatService
 import com.aiaggregator.app.data.local.ApiKeyStore
 import com.aiaggregator.app.data.local.InMemoryStore
@@ -18,6 +20,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -35,6 +38,9 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
 
     private val chatService = ChatService()
     private val keyStore = ApiKeyStore(application)
+    // Independent scope for image generation — survives screen switches
+    private val imageGenSupervisor = kotlinx.coroutines.SupervisorJob()
+    private val imageGenScope = kotlinx.coroutines.CoroutineScope(imageGenSupervisor + Dispatchers.Main)
 
     val sessions: StateFlow<List<Session>> = InMemoryStore.getAllSessions()
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
@@ -46,7 +52,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         private set
 
     private var lastUserPrompt: String? = null
-    private var lastUserImageData: Pair<android.net.Uri?, Boolean>? = null
+    private var lastUserImageData: Pair<List<android.net.Uri>, Boolean>? = null
 
     val currentSessionTitle: String? get() = sessions.value.find { it.id == currentSessionId }?.title
 
@@ -56,6 +62,18 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     val availableModels: List<ModelConfig> get() = keyStore.loadModels()
 
     private var streamJob: Job? = null
+    private var sessionCollectorJob: Job? = null
+    private var imageGenJob: Job? = null
+    private var hintJob: Job? = null
+
+    /** 图片生成状态文本 — UI 观察它来显示轮播提示 */
+    private val _genHint = MutableStateFlow("")
+    val genHint: StateFlow<String> = _genHint.asStateFlow()
+
+    private val genHints = listOf(
+        "构思画面中...", "正在细化细节...", "调整色彩与光影...",
+        "渲染中，请稍候...", "优化画面构图...", "快完成了..."
+    )
 
     fun switchModel(model: ModelConfig) {
         _activeModel.value = model
@@ -89,8 +107,11 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     fun switchSession(sid: String) {
         streamJob?.cancel()
         streamJob = null
+        // Don't cancel imageGenJob/hintJob — let generation survive session switch
+        sessionCollectorJob?.cancel()
         currentSessionId = sid
-        viewModelScope.launch {
+        _genHint.value = ""
+        sessionCollectorJob = viewModelScope.launch {
             InMemoryStore.getMessagesBySession(sid).collect { _messages.value = it }
         }
     }
@@ -105,56 +126,67 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     fun stopGeneration() {
         streamJob?.cancel()
         streamJob = null
+        imageGenJob?.cancel()
+        imageGenJob = null
+        hintJob?.cancel()
+        hintJob = null
+        _genHint.value = ""
         _messages.update { list ->
             list.map { if (it.status == MessageStatus.STREAMING) it.copy(status = MessageStatus.DONE) else it }
         }
     }
 
+    override fun onCleared() {
+        super.onCleared()
+        imageGenSupervisor.cancel()
+    }
+
     fun regenerate() {
         val prompt = lastUserPrompt ?: return
         val data = lastUserImageData
-        // Remove last assistant message if present
         _messages.update { list ->
             if (list.lastOrNull()?.role == MessageRole.ASSISTANT) list.dropLast(1) else list
         }
-        sendMessage(prompt, data?.first, editImage = data?.second ?: false)
+        sendMessage(prompt, data?.first ?: emptyList(), editImage = data?.second ?: false)
     }
 
-    fun sendMessage(text: String, fileUri: android.net.Uri? = null, editImage: Boolean = false) {
-        if (text.isBlank() && fileUri == null) return
+    fun sendMessage(text: String, fileUris: List<android.net.Uri> = emptyList(), editImage: Boolean = false) {
+        if (text.isBlank() && fileUris.isEmpty()) return
         lastUserPrompt = text
-        lastUserImageData = Pair(fileUri, editImage)
+        lastUserImageData = Pair(fileUris, editImage)
         streamJob?.cancel()
         streamJob = null
         viewModelScope.launch {
             ensureSession(text)
             val sid = currentSessionId; if (sid.isEmpty()) return@launch
 
-            // Read file if attached
-            var imageBase64: String? = null
-            var imageMimeType: String? = null
+            // Read all attached files
+            val imageParts = fileUris.mapNotNull { readFileForUpload(it) }
             var userContent = text.trim()
-            if (fileUri != null) {
-                val pair = readFileForUpload(fileUri)
-                if (pair != null) {
-                    imageBase64 = pair.first
-                    imageMimeType = pair.second
-                    if (userContent.isBlank()) userContent = "请描述这张图片"
-                    // Non-vision chat models can't handle images — warn and strip
-                    if (_activeModel.value?.category != ModelCategory.IMAGE) {
-                        val warning = Message(id = java.util.UUID.randomUUID().toString(), sessionId = sid,
-                            role = MessageRole.ASSISTANT, content = "⚠️ 当前模型不支持图片识别，图片未发送。\n请切换到支持视觉的模型后重试。",
-                            timestamp = System.currentTimeMillis(), status = MessageStatus.DONE)
-                        InMemoryStore.insertMessage(warning)
-                        imageBase64 = null; imageMimeType = null
-                    }
-                }
+            if (imageParts.isNotEmpty() && userContent.isBlank()) userContent = "请描述这些图片"
+
+            // Non-vision chat models can't handle images — warn and strip
+            val isImageModel = _activeModel.value?.category == ModelCategory.IMAGE
+            val effectiveParts = if (!isImageModel && imageParts.isNotEmpty()) {
+                val warning = Message(id = java.util.UUID.randomUUID().toString(), sessionId = sid,
+                    role = MessageRole.ASSISTANT, content = "⚠️ 当前模型不支持图片识别，图片未发送。\n请切换到支持视觉的模型后重试。",
+                    timestamp = System.currentTimeMillis(), status = MessageStatus.DONE)
+                InMemoryStore.insertMessage(warning)
+                emptyList()
+            } else imageParts
+
+            // Collect all uploaded image URIs for the user bubble
+            val allImageUris = fileUris.map { it.toString() }
+            // For image models with files: pass first file's base64 for legacy compat
+            val firstBase64 = effectiveParts.firstOrNull()?.let { p ->
+                android.util.Base64.encodeToString(p.bytes, android.util.Base64.NO_WRAP)
             }
+            val firstMime = effectiveParts.firstOrNull()?.mimeType
 
             val um = Message(
                 id = UUID.randomUUID().toString(), sessionId = sid,
                 role = MessageRole.USER, content = userContent,
-                imageUrl = fileUri?.toString(), // Show attached image in chat bubble
+                imageUrls = allImageUris,
                 timestamp = System.currentTimeMillis(), status = MessageStatus.DONE
             )
             InMemoryStore.insertMessage(um)
@@ -164,18 +196,17 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             val config = model?.let { keyStore.loadPlatforms().find { p -> p.id == it.platformId } }
 
             if (model?.category == ModelCategory.IMAGE) {
-                generateImageFlow(sid, userContent, model, config, imageBase64, imageMimeType, editImage)
+                generateImageFlow(sid, userContent, model, config, effectiveParts, editImage)
             } else {
-                startStreamingChat(sid, userContent, config, model, imageBase64, imageMimeType)
+                startStreamingChat(sid, userContent, config, model, firstBase64, firstMime)
             }
         }
     }
 
-    private fun readFileForUpload(uri: android.net.Uri): Pair<String, String>? {
+    private fun readFileForUpload(uri: android.net.Uri): ImagePart? {
         return try {
             val cr = getApplication<android.app.Application>().contentResolver
             val mimeType = cr.getType(uri) ?: kotlin.run {
-                // Fallback: try to guess from file extension or default to image/jpeg
                 val path = uri.lastPathSegment ?: ""
                 when {
                     path.endsWith(".png") -> "image/png"
@@ -186,8 +217,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             }
             if (!mimeType.startsWith("image/")) return null
             val bytes = cr.openInputStream(uri)?.use { it.readBytes() } ?: return null
-            val base64 = android.util.Base64.encodeToString(bytes, android.util.Base64.NO_WRAP)
-            Pair(base64, mimeType)
+            ImagePart(bytes, mimeType)
         } catch (e: Exception) { android.util.Log.e("AIAPP", "readFile err: ${e.message}"); null }
     }
 
@@ -227,7 +257,8 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 val cfg = config.copy()
 
                 withContext(Dispatchers.IO) {
-                    chatService.streamChat(history, cfg, model.modelName).collect { chunk ->
+                    withTimeout(300_000) {
+                        chatService.streamChat(history, cfg, model.modelName).collect { chunk ->
                         when {
                             chunk.error != null -> finishWithError(rm, chunk.error)
                             chunk.isDone -> {
@@ -239,6 +270,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                             chunk.content != null -> appendContent(rm, chunk.content!!)
                         }
                     }
+                    } // withTimeout
                 }
             } catch (e: CancellationException) {
                 // user pressed stop — keep whatever was streamed so far
@@ -286,12 +318,30 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         InMemoryStore.insertMessage(final)
     }
 
+    private fun finishGenerating(rm: Message, sid: String, urls: List<String>?, error: String?) {
+        _genHint.value = ""
+        hintJob?.cancel(); hintJob = null
+        imageGenJob = null
+        val final = if (error != null) {
+            rm.copy(content = "❌ $error", status = MessageStatus.DONE, contentType = ContentType.ERROR)
+        } else {
+            rm.copy(content = "生成图片", imageUrls = urls ?: emptyList(),
+                status = MessageStatus.DONE, contentType = ContentType.IMAGE)
+        }
+        // Always persist
+        InMemoryStore.insertMessage(final)
+        // Only update UI if still on the same session
+        if (sid == currentSessionId) {
+            _messages.update { list -> list.map { if (it.id == rm.id) final else it } }
+        }
+    }
+
     // ---- image generation ----
 
     private fun generateImageFlow(
         sid: String, prompt: String,
         model: ModelConfig, config: com.aiaggregator.app.data.model.ApiConfig?,
-        imageBase64: String? = null, imageMimeType: String? = null,
+        attachedParts: List<ImagePart> = emptyList(),
         editImage: Boolean = false
     ) {
         if (config == null) {
@@ -303,64 +353,108 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
 
         val rm = Message(id = UUID.randomUUID().toString(), sessionId = sid, role = MessageRole.ASSISTANT,
             content = "", timestamp = System.currentTimeMillis(), status = MessageStatus.STREAMING,
-            modelName = model.displayName.ifBlank { model.modelName })
+            contentType = ContentType.IMAGE, modelName = model.displayName.ifBlank { model.modelName })
         InMemoryStore.insertMessage(rm)
 
-        viewModelScope.launch {
+        // Start rotating hints in independent scope
+        hintJob?.cancel()
+        hintJob = imageGenScope.launch {
+            var idx = 0
+            while (true) {
+                _genHint.value = genHints[idx % genHints.size]
+                idx++
+                kotlinx.coroutines.delay(3500)
+            }
+        }
+        imageGenJob = imageGenScope.launch {
             try {
-                val result = when {
-                    // User attached an image → try edit endpoint first
-                    imageBase64 != null -> {
-                        appendContent(rm, "正在根据上传的图片生成...\n")
-                        withContext(Dispatchers.IO) {
-                            val imgBytes = android.util.Base64.decode(imageBase64, android.util.Base64.NO_WRAP)
-                            val editResult = chatService.editImage(prompt, model.modelName, imgBytes, config)
-                            if (editResult.error != null) {
-                                // Edit failed (maybe model doesn't support it), fall back to generate
-                                chatService.generateImage(prompt, model.modelName, config)
-                            } else editResult
+                // Collect all reference images
+                val refImages = mutableListOf<ImagePart>()
+                refImages.addAll(attachedParts)
+
+                // If edit toggle is ON and there's a previous AI image, download and add it
+                if (editImage) {
+                    val lastImg = _messages.value.lastOrNull { it.role == MessageRole.ASSISTANT && it.allImageUrls.isNotEmpty() }
+                    if (lastImg != null) {
+                        val lastUrl = lastImg.allImageUrls.first()
+                        appendContent(rm, "正在下载上一张图片...\n")
+                        val prevBytes = withContext(Dispatchers.IO) { downloadImage(lastUrl) }
+                        if (prevBytes != null) {
+                            val prevMime = guessMimeFromUrl(lastUrl)
+                            refImages.add(ImagePart(prevBytes, prevMime))
                         }
                     }
-                    // Edit only when toggle is ON and there's a previous image
-                    editImage && _messages.value.lastOrNull { it.role == MessageRole.ASSISTANT && !it.imageUrl.isNullOrBlank() } != null -> {
-                        val lastUrl = _messages.value.last { it.role == MessageRole.ASSISTANT && !it.imageUrl.isNullOrBlank() }.imageUrl!!
-                        appendContent(rm, "正在修改图片...\n")
-                        withContext(Dispatchers.IO) {
-                            val imgBytes = downloadImage(lastUrl)
-                            if (imgBytes != null) chatService.editImage(prompt, model.modelName, imgBytes, config)
-                            else chatService.generateImage(prompt, model.modelName, config)
-                        }
-                    }
-                    // Fresh generation
-                    else -> withContext(Dispatchers.IO) { chatService.generateImage(prompt, model.modelName, config) }
                 }
-                if (result.error != null) {
-                    finishWithError(rm, result.error)
-                } else if (result.urls.isEmpty()) {
-                    finishWithError(rm, "未返回图片")
+
+                val result = if (refImages.isNotEmpty()) {
+                    appendContent(rm, "正在根据${refImages.size}张参考图生成...\n")
+                    withContext(Dispatchers.IO) {
+                        chatService.editImage(prompt, model.modelName, refImages, config)
+                    }
                 } else {
-                    val url = result.urls.first()
-                    val final = rm.copy(
-                        content = "生成图片", imageUrl = url,
-                        status = MessageStatus.DONE, contentType = ContentType.IMAGE
-                    )
-                    _messages.update { list -> list.map { if (it.id == rm.id) final else it } }
-                    InMemoryStore.insertMessage(final)
+                    withContext(Dispatchers.IO) { chatService.generateImage(prompt, model.modelName, config) }
                 }
+
+                if (result.error != null) {
+                    finishGenerating(rm, sid, null, result.error)
+                } else {
+                    val displayUrl = resolveDisplayUrl(result)
+                    if (displayUrl == null) {
+                        finishGenerating(rm, sid, null, "未返回图片")
+                    } else {
+                        finishGenerating(rm, sid, listOf(displayUrl), null)
+                    }
+                }
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                // Silently stop — user switched away, generation result discarded
+                _genHint.value = ""
+                hintJob?.cancel(); hintJob = null
+                imageGenJob = null
             } catch (e: Exception) {
                 val detail = when {
-                    e.message != null -> e.message!!
                     e is java.io.IOException -> "网络连接失败"
-                    else -> "未知错误 (${e.javaClass.simpleName})"
+                    else -> e.message ?: "未知错误"
                 }
-                finishWithError(rm, "图片处理失败: $detail")
+                finishGenerating(rm, sid, null, "图片处理失败: $detail")
             }
         }
     }
 
+    private fun resolveDisplayUrl(result: ImageGenResult): String? {
+        // Prefer URL if available
+        result.urls.firstOrNull()?.let { return it }
+        // Decode first b64_json to cache file
+        result.base64Images.firstOrNull()?.let { b64 ->
+            return try {
+                val bytes = android.util.Base64.decode(b64, android.util.Base64.NO_WRAP)
+                val cacheDir = java.io.File(getApplication<android.app.Application>().cacheDir, "images")
+                cacheDir.mkdirs()
+                val file = java.io.File(cacheDir, "gen_${System.currentTimeMillis()}.png")
+                file.writeBytes(bytes)
+                file.toURI().toString()
+            } catch (_: Exception) { null }
+        }
+        return null
+    }
+
+    private fun guessMimeFromUrl(url: String): String {
+        return when {
+            url.contains(".png") || url.contains("image/png") -> "image/png"
+            url.contains(".webp") || url.contains("image/webp") -> "image/webp"
+            url.contains(".jpg") || url.contains(".jpeg") || url.contains("image/jpeg") -> "image/jpeg"
+            else -> "image/png"
+        }
+    }
+
     private suspend fun downloadImage(url: String): ByteArray? {
+        // If it's a local file:// URI, read directly
+        if (url.startsWith("file://")) {
+            return try {
+                java.io.File(java.net.URI(url)).readBytes()
+            } catch (_: Exception) { null }
+        }
         return try {
-            val client = com.aiaggregator.app.data.remote.HttpClientFactory.create()
+            val client = com.aiaggregator.app.data.remote.HttpClientFactory.client
             val request = okhttp3.Request.Builder().url(url).build()
             val response = client.newCall(request).execute()
             if (response.isSuccessful) response.body?.bytes() else null
@@ -379,6 +473,6 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         InMemoryStore.insertSession(s)
         currentSessionId = s.id
         switchSession(s.id)
-        delay(50)
+        // No delay — sessionCollectorJob guarantees sequential startup
     }
 }

@@ -1,5 +1,10 @@
 package com.aiaggregator.app.ui.settings
 
+import android.content.Intent
+import android.net.Uri
+import android.widget.Toast
+import androidx.compose.foundation.Image
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -8,44 +13,110 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import android.content.Intent
-import android.net.Uri
-import androidx.compose.foundation.clickable
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.ElevatedCard
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.ElevatedCard
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.unit.dp
 import com.aiaggregator.app.R
+import kotlinx.coroutines.launch
 
 @Composable
 fun AboutScreen() {
+    val ctx = LocalContext.current
+    val scope = rememberCoroutineScope()
+    var showUpdateDialog by remember { mutableStateOf(UpdateChecker.Result()) }
+    var checking by remember { mutableStateOf(false) }
+
+    fun doCheck() {
+        if (checking) return
+        checking = true
+        scope.launch {
+            val result = UpdateChecker.check()
+            checking = false
+            if (result.error != null) {
+                Toast.makeText(ctx, result.error, Toast.LENGTH_SHORT).show()
+            } else if (result.hasUpdate) {
+                showUpdateDialog = result
+            } else {
+                Toast.makeText(ctx, "已是最新版本", Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
+
+    // Update dialog
+    if (showUpdateDialog.hasUpdate) {
+        AlertDialog(
+            onDismissRequest = { showUpdateDialog = UpdateChecker.Result() },
+            title = { Text("发现新版本") },
+            text = {
+                Text("最新版本：${showUpdateDialog.latestVersion}\n当前版本：${UpdateChecker.getAppVersion()}\n\n请到开源地址下载最新安装包。")
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    ctx.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(showUpdateDialog.downloadUrl)))
+                    showUpdateDialog = UpdateChecker.Result()
+                }) { Text("去下载") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showUpdateDialog = UpdateChecker.Result() }) { Text("稍后") }
+            },
+            shape = RoundedCornerShape(20.dp)
+        )
+    }
     Column(
         Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(24.dp),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
         Spacer(Modifier.height(48.dp))
 
-        Box(contentAlignment = Alignment.Center, modifier = Modifier.size(96.dp).clip(RoundedCornerShape(24.dp))) { Image(painter = painterResource(R.drawable.bjlg), contentDescription = null, modifier = Modifier.fillMaxSize()); Image(painter = painterResource(R.drawable.qjlg), contentDescription = "清畅AI", modifier = Modifier.fillMaxSize()) }
+        Box(contentAlignment = Alignment.Center, modifier = Modifier.size(96.dp).clip(RoundedCornerShape(24.dp))) {
+            Image(painter = painterResource(R.drawable.bjlg), contentDescription = null, modifier = Modifier.fillMaxSize())
+            Image(painter = painterResource(R.drawable.qjlg), contentDescription = "清畅AI", modifier = Modifier.fillMaxSize())
+        }
 
         Spacer(Modifier.height(20.dp))
         Text("清畅AI", style = MaterialTheme.typography.headlineSmall)
         Spacer(Modifier.height(6.dp))
-        Text("版本 1.0.0 · 开源免费", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+
+        // Version + check update
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text("版本 ${UpdateChecker.getAppVersion()} · 开源免费", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Spacer(Modifier.width(8.dp))
+            Surface(
+                modifier = Modifier.clickable { doCheck() },
+                shape = RoundedCornerShape(8.dp),
+                color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.6f)
+            ) {
+                Text(
+                    if (checking) "检查中..." else "检查更新",
+                    Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.primary
+                )
+            }
+        }
 
         Spacer(Modifier.height(8.dp))
         Surface(shape = RoundedCornerShape(6.dp), color = MaterialTheme.colorScheme.secondaryContainer) {
@@ -91,7 +162,6 @@ fun AboutScreen() {
         Spacer(Modifier.height(24.dp))
 
         // 下载更新
-        val ctx = LocalContext.current
         ElevatedCard(
             Modifier.fillMaxWidth(),
             shape = RoundedCornerShape(20.dp),
@@ -101,12 +171,11 @@ fun AboutScreen() {
                 Text("下载更新", style = MaterialTheme.typography.titleSmall)
                 Spacer(Modifier.height(4.dp))
                 Text(
-                    "当前版本 1.0.0。新版本发布后可到以下开源地址下载最新安装包。",
+                    "当前版本 ${UpdateChecker.getAppVersion()}。新版本发布后可到以下开源地址下载最新安装包。",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
                 Spacer(Modifier.height(12.dp))
-                // GitHub
                 Surface(
                     Modifier.fillMaxWidth().clickable {
                         ctx.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://github.com/qiancheng66885/QingChangAI")))
@@ -120,7 +189,6 @@ fun AboutScreen() {
                     }
                 }
                 Spacer(Modifier.height(8.dp))
-                // Gitee
                 Surface(
                     Modifier.fillMaxWidth().clickable {
                         ctx.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://gitee.com/qiancheng2025/QingChangAI")))
