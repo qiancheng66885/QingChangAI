@@ -160,8 +160,51 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             ensureSession(text)
             val sid = currentSessionId; if (sid.isEmpty()) return@launch
 
-            // Read all attached files
-            val imageParts = fileUris.mapNotNull { readFileForUpload(it) }
+            // Check storage space
+            val freeMB = withContext(Dispatchers.IO) {
+                getApplication<android.app.Application>().filesDir.usableSpace / (1024 * 1024)
+            }
+            if (freeMB < 100) {
+                val warning = Message(id = java.util.UUID.randomUUID().toString(), sessionId = sid,
+                    role = MessageRole.ASSISTANT,
+                    content = "⚠️ 手机存储空间不足（剩余 ${freeMB}MB），可能影响图片保存和聊天记录。建议清理后再使用。",
+                    timestamp = System.currentTimeMillis(), status = MessageStatus.DONE)
+                InMemoryStore.insertMessage(warning)
+            }
+
+            // Read all attached files on IO thread, save to persistent storage
+            val imageParts = mutableListOf<ImagePart>()
+            val displayUris = mutableListOf<String>()
+            val oversizedUris = mutableListOf<String>()
+            withContext(Dispatchers.IO) {
+                val imgDir = java.io.File(getApplication<android.app.Application>().filesDir, "images")
+                imgDir.mkdirs()
+                for (uri in fileUris) {
+                    val part = readFileForUpload(uri) ?: continue
+                    if (part.bytes.size > 50 * 1024 * 1024) {
+                        oversizedUris.add(uri.toString())
+                        continue
+                    }
+                    imageParts.add(part)
+                    // Save to persistent storage so old messages keep their images
+                    val ext = when {
+                        part.mimeType.contains("png") -> "png"
+                        part.mimeType.contains("webp") -> "webp"
+                        part.mimeType.contains("gif") -> "gif"
+                        else -> "jpg"
+                    }
+                    val file = java.io.File(imgDir, "img_${System.currentTimeMillis()}_${imageParts.size}.$ext")
+                    file.writeBytes(part.bytes)
+                    displayUris.add(file.toURI().toString())
+                }
+            }
+            if (oversizedUris.isNotEmpty()) {
+                val warning = Message(id = java.util.UUID.randomUUID().toString(), sessionId = sid,
+                    role = MessageRole.ASSISTANT,
+                    content = "⚠️ ${oversizedUris.size} 张图片超过 50MB 限制（OpenAI 官方上限），已自动跳过。建议先压缩再上传。",
+                    timestamp = System.currentTimeMillis(), status = MessageStatus.DONE)
+                InMemoryStore.insertMessage(warning)
+            }
             var userContent = text.trim()
             if (imageParts.isNotEmpty() && userContent.isBlank()) userContent = "请描述这些图片"
 
@@ -175,8 +218,8 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 emptyList()
             } else imageParts
 
-            // Collect all uploaded image URIs for the user bubble
-            val allImageUris = fileUris.map { it.toString() }
+            // Store persistent file:// URIs — survive app restart
+            val allImageUris = displayUris
             // For image models with files: pass first file's base64 for legacy compat
             val firstBase64 = effectiveParts.firstOrNull()?.let { p ->
                 android.util.Base64.encodeToString(p.bytes, android.util.Base64.NO_WRAP)
@@ -204,7 +247,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private fun readFileForUpload(uri: android.net.Uri): ImagePart? {
-        return try {
+        try {
             val cr = getApplication<android.app.Application>().contentResolver
             val mimeType = cr.getType(uri) ?: kotlin.run {
                 val path = uri.lastPathSegment ?: ""
@@ -216,9 +259,41 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 }
             }
             if (!mimeType.startsWith("image/")) return null
-            val bytes = cr.openInputStream(uri)?.use { it.readBytes() } ?: return null
-            ImagePart(bytes, mimeType)
-        } catch (e: Exception) { android.util.Log.e("AIAPP", "readFile err: ${e.message}"); null }
+            // Three fallback methods — cropped images may need #2 or #3
+            var bytes: ByteArray? = null
+            // Method 1: openInputStream
+            try { cr.openInputStream(uri)?.use { bytes = it.readBytes() } } catch (_: Exception) {}
+            // Method 2: openFileDescriptor
+            if (bytes == null) {
+                try {
+                    val fd = cr.openFileDescriptor(uri, "r")
+                    if (fd != null) {
+                        val bmp = android.graphics.BitmapFactory.decodeFileDescriptor(fd.fileDescriptor)
+                        fd.close()
+                        if (bmp != null) {
+                            val stream = java.io.ByteArrayOutputStream()
+                            bmp.compress(if (mimeType.contains("png")) android.graphics.Bitmap.CompressFormat.PNG else android.graphics.Bitmap.CompressFormat.JPEG, 92, stream)
+                            bytes = stream.toByteArray()
+                        }
+                    }
+                } catch (_: Exception) {}
+            }
+            // Method 3: openAssetFileDescriptor (some gallery apps only support this)
+            if (bytes == null) {
+                try {
+                    val afd = cr.openAssetFileDescriptor(uri, "r")
+                    if (afd != null) {
+                        bytes = afd.createInputStream().use { it.readBytes() }
+                        afd.close()
+                    }
+                } catch (_: Exception) {}
+            }
+            if (bytes == null) {
+                android.util.Log.e("AIAPP", "All methods failed for: $uri (mime=$mimeType)")
+                return null
+            }
+            return ImagePart(bytes, mimeType)
+        } catch (e: Exception) { android.util.Log.e("AIAPP", "readFile err: ${e.message}"); return null }
     }
 
     // ---- streaming chat ----
@@ -427,7 +502,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         result.base64Images.firstOrNull()?.let { b64 ->
             return try {
                 val bytes = android.util.Base64.decode(b64, android.util.Base64.NO_WRAP)
-                val cacheDir = java.io.File(getApplication<android.app.Application>().cacheDir, "images")
+                val cacheDir = java.io.File(getApplication<android.app.Application>().filesDir, "images")
                 cacheDir.mkdirs()
                 val file = java.io.File(cacheDir, "gen_${System.currentTimeMillis()}.png")
                 file.writeBytes(bytes)

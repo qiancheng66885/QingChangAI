@@ -107,9 +107,11 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.text.SpanStyle
@@ -195,7 +197,6 @@ fun MainApp() {
         if (bitmap != null) {
             val file = java.io.File(ctx.cacheDir, "photo_${System.currentTimeMillis()}.jpg")
             file.outputStream().use { bitmap.compress(android.graphics.Bitmap.CompressFormat.JPEG, 90, it) }
-            // Use FileProvider to get a content:// URI that Coil and ContentResolver can both read
             val photoUri = androidx.core.content.FileProvider.getUriForFile(
                 ctx, "${ctx.packageName}.fileprovider", file
             )
@@ -289,7 +290,7 @@ fun MainApp() {
                 when (currentScreen) {
                     Screen.CHAT -> Column(Modifier.fillMaxSize().imePadding()) {
                         Box(Modifier.weight(1f)) {
-                            ChatView(messages, ctx, activeModel, onSuggestionClick = { inputText = it }, onRegenerate = { chatVM.regenerate() })
+                            ChatView(messages, ctx, activeModel, onSuggestionClick = { inputText = it }, onRegenerate = { chatVM.regenerate() }, onStop = { chatVM.stopGeneration() })
                         }
                         // Pre-send warning: image attached to non-vision model
                         if (attachedFiles.isNotEmpty() && activeModel?.category != ModelCategory.IMAGE) {
@@ -360,7 +361,7 @@ fun MainApp() {
 // ── Chat ──
 
 @Composable
-private fun ChatView(messages: List<Message>, ctx: Context, activeModel: ModelConfig?, onSuggestionClick: (String) -> Unit, onRegenerate: () -> Unit = {}) {
+private fun ChatView(messages: List<Message>, ctx: Context, activeModel: ModelConfig?, onSuggestionClick: (String) -> Unit, onRegenerate: () -> Unit = {}, onStop: () -> Unit = {}) {
     if (messages.isEmpty()) {
         val suggestionPool = remember {
             listOf(
@@ -428,14 +429,14 @@ private fun ChatView(messages: List<Message>, ctx: Context, activeModel: ModelCo
                 val idx = messages.indexOf(msg)
                 val prev = if (idx > 0) messages[idx - 1].role else null
                 val next = if (idx < messages.lastIndex) messages[idx + 1].role else null
-                ChatBubble(msg, prev, next, ctx, onRegenerate)
+                ChatBubble(msg, prev, next, ctx, onRegenerate, onStop)
             }
         }
     }
 }
 
 @Composable
-private fun ChatBubble(msg: Message, prev: MessageRole?, next: MessageRole?, ctx: Context, onRegenerate: () -> Unit = {}) {
+private fun ChatBubble(msg: Message, prev: MessageRole?, next: MessageRole?, ctx: Context, onRegenerate: () -> Unit = {}, onStop: () -> Unit = {}) {
     val isUser = msg.role == MessageRole.USER
     val streaming = msg.status == MessageStatus.STREAMING
     val first = prev != msg.role
@@ -464,7 +465,7 @@ private fun ChatBubble(msg: Message, prev: MessageRole?, next: MessageRole?, ctx
             Column {
                 // Generating shimmer for image
                 if (!isUser && streaming && msg.contentType == com.aiaggregator.app.data.model.ContentType.IMAGE) {
-                    ImageShimmer()
+                    ImageShimmer(onStop = onStop)
                 }
                 val images = msg.allImageUrls
                 if (images.isNotEmpty()) {
@@ -569,20 +570,7 @@ private fun ChatBubble(msg: Message, prev: MessageRole?, next: MessageRole?, ctx
 }
 
 @Composable
-private fun ImageShimmer() {
-    val hints = remember { listOf(
-        "构思画面中...", "正在细化细节...", "调整色彩与光影...",
-        "渲染中，请稍候...", "优化画面构图...", "快完成了..."
-    )}
-    val hintIndex by rememberInfiniteTransition().animateFloat(
-        initialValue = 0f, targetValue = (hints.size - 1).toFloat(),
-        animationSpec = infiniteRepeatable(
-            animation = tween(hints.size * 3500, easing = LinearEasing),
-            repeatMode = RepeatMode.Restart
-        )
-    )
-    val displayHint = hints[hintIndex.toInt().coerceIn(0, hints.size - 1)]
-
+private fun ImageShimmer(onStop: (() -> Unit)? = null) {
     val infinite = rememberInfiniteTransition()
     val shimmerX by infinite.animateFloat(
         initialValue = -200f, targetValue = 500f,
@@ -600,14 +588,46 @@ private fun ImageShimmer() {
         start = androidx.compose.ui.geometry.Offset(shimmerX, 0f),
         end = androidx.compose.ui.geometry.Offset(shimmerX + 200f, 0f)
     )
-    // Pseudo progress bar — fills to 70% over 12s, then resets
+    // Pseudo progress bar — fills to 70% over 15s
     val progressAnim by infinite.animateFloat(
         initialValue = 0f, targetValue = 0.7f,
         animationSpec = infiniteRepeatable(
-            animation = tween(12000, easing = LinearEasing),
+            animation = tween(15000, easing = LinearEasing),
             repeatMode = RepeatMode.Restart
         )
     )
+
+    // Elapsed time counter
+    var elapsedSec by remember { mutableStateOf(0) }
+    LaunchedEffect(Unit) {
+        while (true) {
+            kotlinx.coroutines.delay(1000)
+            elapsedSec++
+        }
+    }
+
+    // Smart hints — comfort first, warn later
+    val hint = when {
+        elapsedSec < 10 -> "正在连接服务器..."
+        elapsedSec < 25 -> "正在生成，请稍候..."
+        elapsedSec < 45 -> "模型处理中，不同平台速度有差异..."
+        elapsedSec < 70 -> "中转站/逆向/官转等接口类型会影响生成速度"
+        elapsedSec < 95 -> "上游服务器当前负载也会影响响应时间"
+        elapsedSec < 120 -> "图片越复杂、尺寸越大，生成越慢"
+        elapsedSec < 180 -> "已等待 2 分钟，可继续等待或停止重试"
+        else -> "等待时间较长，建议停止后重试或切换平台"
+    }
+
+    val hintColor = when {
+        elapsedSec < 120 -> MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.8f)
+        else -> MaterialTheme.colorScheme.error.copy(alpha = 0.75f)
+    }
+
+    val elapsedText = when {
+        elapsedSec < 60 -> "${elapsedSec}秒"
+        else -> "${elapsedSec / 60}分${elapsedSec % 60}秒"
+    }
+
     Surface(
         Modifier.widthIn(max = 300.dp).padding(4.dp),
         shape = RoundedCornerShape(16.dp),
@@ -615,7 +635,7 @@ private fun ImageShimmer() {
         color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f)
     ) {
         Column(Modifier.padding(12.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-            // Shimmer placeholder matching output dimensions
+            // Shimmer placeholder
             Box(
                 Modifier.fillMaxWidth().height(180.dp)
                     .clip(RoundedCornerShape(12.dp))
@@ -630,12 +650,24 @@ private fun ImageShimmer() {
                 trackColor = MaterialTheme.colorScheme.surfaceVariant,
             )
             Spacer(Modifier.height(8.dp))
-            // Rotating hint text with fade
-            AnimatedContent(displayHint, Modifier.fillMaxWidth()) { text ->
-                Text(text, style = MaterialTheme.typography.labelMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
-                    modifier = Modifier.fillMaxWidth(),
-                    textAlign = androidx.compose.ui.text.style.TextAlign.Center)
+            // Hint text
+            Text(hint, style = MaterialTheme.typography.labelMedium,
+                color = hintColor, modifier = Modifier.fillMaxWidth(),
+                textAlign = androidx.compose.ui.text.style.TextAlign.Center)
+            Spacer(Modifier.height(2.dp))
+            // Elapsed time
+            Text(elapsedText, style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f),
+                modifier = Modifier.fillMaxWidth(),
+                textAlign = androidx.compose.ui.text.style.TextAlign.Center)
+            // Stop button (appears after 2 min)
+            if (onStop != null && elapsedSec >= 120) {
+                Spacer(Modifier.height(8.dp))
+                TextButton(onClick = onStop, contentPadding = PaddingValues(horizontal = 16.dp, vertical = 4.dp)) {
+                    Icon(Icons.Filled.Close, null, Modifier.size(14.dp))
+                    Spacer(Modifier.width(4.dp))
+                    Text("停止等待", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.error)
+                }
             }
         }
     }
@@ -645,13 +677,38 @@ private fun ImageShimmer() {
 
 @Composable
 private fun AttachmentThumb(uri: Uri, onRemove: () -> Unit) {
+    val ctx = LocalContext.current
+    var bitmap by remember(uri) { mutableStateOf<android.graphics.Bitmap?>(null) }
+    LaunchedEffect(uri) {
+        withContext(Dispatchers.IO) {
+            val opts = android.graphics.BitmapFactory.Options().apply { inSampleSize = 2 }
+            try {
+                val input = ctx.contentResolver.openInputStream(uri)
+                if (input != null) { bitmap = android.graphics.BitmapFactory.decodeStream(input, null, opts); input.close() }
+            } catch (_: Exception) {}
+            if (bitmap == null) {
+                try {
+                    val fd = ctx.contentResolver.openFileDescriptor(uri, "r")
+                    if (fd != null) { bitmap = android.graphics.BitmapFactory.decodeFileDescriptor(fd.fileDescriptor, null, opts); fd.close() }
+                } catch (_: Exception) {}
+            }
+            if (bitmap == null) {
+                try {
+                    val afd = ctx.contentResolver.openAssetFileDescriptor(uri, "r")
+                    if (afd != null) { bitmap = android.graphics.BitmapFactory.decodeStream(afd.createInputStream(), null, opts); afd.close() }
+                } catch (_: Exception) {}
+            }
+        }
+    }
     Box(Modifier.size(56.dp).clip(RoundedCornerShape(12.dp))) {
-        AsyncImage(
-            model = uri, contentDescription = "预览",
-            modifier = Modifier.fillMaxSize(),
-            placeholder = ColorPainter(MaterialTheme.colorScheme.surfaceVariant),
-            error = ColorPainter(MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.2f))
-        )
+        val bmp = bitmap
+        if (bmp != null) {
+            Image(bitmap = bmp.asImageBitmap(), contentDescription = "预览",
+                modifier = Modifier.fillMaxSize(),
+                contentScale = ContentScale.Crop)
+        } else {
+            Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.surfaceVariant))
+        }
         // × remove button
         Box(
             Modifier.align(Alignment.TopEnd).size(18.dp)
@@ -661,6 +718,45 @@ private fun AttachmentThumb(uri: Uri, onRemove: () -> Unit) {
         ) {
             Icon(Icons.Filled.Close, "移除", Modifier.size(12.dp), tint = Color.White)
         }
+    }
+}
+
+// ── Reliable local/remote thumbnail loader ──
+
+@Composable
+private fun ThumbImage(url: String, modifier: Modifier = Modifier) {
+    val ctx = LocalContext.current
+    val isLocal = url.startsWith("content://") || url.startsWith("file://")
+    if (isLocal) {
+        var bitmap by remember(url) { mutableStateOf<android.graphics.Bitmap?>(null) }
+        LaunchedEffect(url) {
+            withContext(Dispatchers.IO) {
+                val opts = android.graphics.BitmapFactory.Options().apply { inSampleSize = 2 }
+                val uri = android.net.Uri.parse(url)
+                try {
+                    val input = ctx.contentResolver.openInputStream(uri)
+                    if (input != null) { bitmap = android.graphics.BitmapFactory.decodeStream(input, null, opts); input.close() }
+                } catch (_: Exception) {}
+                if (bitmap == null) {
+                    try {
+                        val fd = ctx.contentResolver.openFileDescriptor(uri, "r")
+                        if (fd != null) { bitmap = android.graphics.BitmapFactory.decodeFileDescriptor(fd.fileDescriptor, null, opts); fd.close() }
+                    } catch (_: Exception) {}
+                }
+            }
+        }
+        val bmp = bitmap
+        if (bmp != null) {
+            Image(bitmap = bmp.asImageBitmap(), contentDescription = null,
+                modifier = modifier, contentScale = ContentScale.Crop)
+        } else {
+            Box(modifier.background(MaterialTheme.colorScheme.surfaceVariant))
+        }
+    } else {
+        AsyncImage(model = url, contentDescription = null,
+            modifier = modifier, contentScale = ContentScale.Crop,
+            placeholder = ColorPainter(MaterialTheme.colorScheme.surfaceVariant),
+            error = ColorPainter(MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.2f)))
     }
 }
 
@@ -680,12 +776,7 @@ private fun ImageGrid(images: List<String>, modifier: Modifier = Modifier, onIma
                 rowImages.forEachIndexed { idx, url ->
                     val globalIdx = images.indexOf(url)
                     Box(Modifier.size(cellSize).clip(RoundedCornerShape(8.dp))) {
-                        AsyncImage(
-                            model = url, contentDescription = "图片 $globalIdx",
-                            modifier = Modifier.fillMaxSize().clickable { onImageClick(globalIdx) },
-                            placeholder = ColorPainter(MaterialTheme.colorScheme.surfaceVariant),
-                            error = ColorPainter(MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.2f))
-                        )
+                        ThumbImage(url = url, modifier = Modifier.fillMaxSize().clickable { onImageClick(globalIdx) })
                     }
                 }
                 // Fill empty slots
@@ -709,7 +800,7 @@ private fun AiImageCard(url: String, modifier: Modifier = Modifier, onClick: () 
     ) {
         Box {
             AsyncImage(
-                model = url, contentDescription = "生成的图片",
+                model = android.net.Uri.parse(url), contentDescription = "生成的图片",
                 modifier = Modifier.widthIn(max = 300.dp).clickable { onClick() },
                 placeholder = ColorPainter(MaterialTheme.colorScheme.surfaceVariant),
                 error = ColorPainter(MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.2f))
@@ -746,8 +837,9 @@ private fun ImageGallery(images: List<String>, modifier: Modifier = Modifier, on
             ) {
                 Box {
                     AsyncImage(
-                        model = url, contentDescription = "图片 $idx",
+                        model = android.net.Uri.parse(url), contentDescription = "图片 $idx",
                         modifier = Modifier.width(140.dp).height(140.dp).clickable { onImageClick(idx) },
+                        contentScale = androidx.compose.ui.layout.ContentScale.Crop,
                         placeholder = ColorPainter(MaterialTheme.colorScheme.surfaceVariant),
                         error = ColorPainter(MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.2f))
                     )
@@ -782,7 +874,7 @@ private fun FullscreenImageViewer(images: List<String>, initialIndex: Int, onDis
         Box(Modifier.fillMaxSize().background(Color.Black)) {
             val currentUrl = images.getOrNull(currentIndex) ?: return@Box
             AsyncImage(
-                model = currentUrl, contentDescription = "全屏查看",
+                model = android.net.Uri.parse(currentUrl), contentDescription = "全屏查看",
                 modifier = Modifier.fillMaxSize().pointerInput(Unit) {
                     detectTransformGestures { _, pan, zoom, _ ->
                         scale = (scale * zoom).coerceIn(1f, 5f)

@@ -25,7 +25,7 @@ object ApiConstants {
     const val DEFAULT_CONNECT_TIMEOUT_SECONDS = 30L
 
     /** 默认读取超时（秒）— SSE 流式请求可能需要更长时间 */
-    const val DEFAULT_READ_TIMEOUT_SECONDS = 120L
+    const val DEFAULT_READ_TIMEOUT_SECONDS = 300L
 
     /** 最大重试次数 */
     const val MAX_RETRY_COUNT = 3

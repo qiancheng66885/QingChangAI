@@ -15,6 +15,6 @@ object AdapterUtils {
     }
 
     fun errorBodySummary(body: String): String {
-        return if (body.length > 200) body.take(200) + "..." else body
+        return if (body.length > 500) body.take(500) + "..." else body
     }
 }

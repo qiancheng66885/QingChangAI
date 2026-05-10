@@ -10,9 +10,10 @@ object HttpClientFactory {
     /** Cached singleton — shared across all adapters and callers */
     val client: OkHttpClient by lazy {
         OkHttpClient.Builder()
-            .connectTimeout(ApiConstants.DEFAULT_CONNECT_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+            .connectTimeout(30, TimeUnit.SECONDS)
             .readTimeout(ApiConstants.DEFAULT_READ_TIMEOUT_SECONDS, TimeUnit.SECONDS)
-            .writeTimeout(30, TimeUnit.SECONDS)
+            .writeTimeout(120, TimeUnit.SECONDS)
+            .callTimeout(5, TimeUnit.MINUTES) // absolute cap — zombie connections die here
             .addInterceptor(HttpLoggingInterceptor().apply {
                 level = HttpLoggingInterceptor.Level.HEADERS
             })
@@ -25,7 +26,7 @@ object HttpClientFactory {
             .connectTimeout(ApiConstants.DEFAULT_CONNECT_TIMEOUT_SECONDS, TimeUnit.SECONDS)
             .readTimeout(0, TimeUnit.MILLISECONDS)
             .callTimeout(5, TimeUnit.MINUTES)
-            .writeTimeout(30, TimeUnit.SECONDS)
+            .writeTimeout(120, TimeUnit.SECONDS)
             .addInterceptor(HttpLoggingInterceptor().apply {
                 level = HttpLoggingInterceptor.Level.HEADERS
             })
