@@ -13,6 +13,7 @@ import com.aiaggregator.app.data.model.AppLanguage
 import com.aiaggregator.app.data.model.AppSettings
 import com.aiaggregator.app.data.model.ThemeMode
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 
 private val Context.settingsDataStore: DataStore<Preferences> by preferencesDataStore(
@@ -80,24 +81,16 @@ class SettingsStore(private val context: Context) {
      * 获取上次配置的 ETag（用于条件请求）。
      */
     suspend fun getLastEtag(): String? {
-        var etag: String? = null
-        context.settingsDataStore.data.collect { prefs ->
-            etag = prefs[Keys.LAST_CONFIG_ETAG]
-            return@collect // 只取一次
-        }
-        return etag
+        val prefs = context.settingsDataStore.data.first()
+        return prefs[Keys.LAST_CONFIG_ETAG]
     }
 
     /**
      * 判断距上次配置拉取是否已超过指定间隔。
      */
     suspend fun shouldFetchConfig(minIntervalMs: Long): Boolean {
-        var shouldFetch = true
-        context.settingsDataStore.data.collect { prefs ->
-            val lastFetch = prefs[Keys.LAST_CONFIG_FETCH_AT] ?: 0L
-            shouldFetch = (System.currentTimeMillis() - lastFetch) >= minIntervalMs
-            return@collect
-        }
-        return shouldFetch
+        val prefs = context.settingsDataStore.data.first()
+        val lastFetch = prefs[Keys.LAST_CONFIG_FETCH_AT] ?: 0L
+        return (System.currentTimeMillis() - lastFetch) >= minIntervalMs
     }
 }

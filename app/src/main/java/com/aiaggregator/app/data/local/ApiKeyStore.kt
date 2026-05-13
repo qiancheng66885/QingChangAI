@@ -4,6 +4,7 @@ import android.content.Context
 import androidx.security.crypto.EncryptedSharedPreferences
 import androidx.security.crypto.MasterKey
 import com.aiaggregator.app.base.constants.StorageConstants
+import com.aiaggregator.app.base.utils.LogUtil
 import com.aiaggregator.app.data.model.ApiConfig
 import com.aiaggregator.app.data.model.ModelConfig
 import kotlinx.serialization.encodeToString
@@ -39,15 +40,19 @@ class ApiKeyStore(context: Context) {
 
     fun loadPlatforms(): List<ApiConfig> {
         val str = prefs.getString(StorageConstants.KEY_PLATFORMS, null) ?: return emptyList()
-        return try { json.decodeFromString<List<ApiConfig>>(str) } catch (_: Exception) { emptyList() }
+        return try { json.decodeFromString<List<ApiConfig>>(str) } catch (e: Exception) {
+            LogUtil.e("ApiKeyStore", "平台配置数据损坏，已重置", e)
+            emptyList()
+        }
     }
 
     fun deletePlatform(id: String) {
-        val list = loadPlatforms().filter { it.id != id }
-        prefs.edit().putString(StorageConstants.KEY_PLATFORMS, json.encodeToString(list)).apply()
-        // 同步删除关联模型
+        val platforms = loadPlatforms().filter { it.id != id }
         val models = loadModels().filter { it.platformId != id }
-        prefs.edit().putString(StorageConstants.KEY_MODELS, json.encodeToString(models)).apply()
+        prefs.edit()
+            .putString(StorageConstants.KEY_PLATFORMS, json.encodeToString(platforms))
+            .putString(StorageConstants.KEY_MODELS, json.encodeToString(models))
+            .apply()
     }
 
     // === 模型 ===
@@ -59,9 +64,17 @@ class ApiKeyStore(context: Context) {
         prefs.edit().putString(StorageConstants.KEY_MODELS, json.encodeToString(list)).apply()
     }
 
+    /** 批量保存整个模型列表（单次写入） */
+    fun saveAllModels(models: List<ModelConfig>) {
+        prefs.edit().putString(StorageConstants.KEY_MODELS, json.encodeToString(models)).apply()
+    }
+
     fun loadModels(): List<ModelConfig> {
         val str = prefs.getString(StorageConstants.KEY_MODELS, null) ?: return emptyList()
-        return try { json.decodeFromString<List<ModelConfig>>(str) } catch (_: Exception) { emptyList() }
+        return try { json.decodeFromString<List<ModelConfig>>(str) } catch (e: Exception) {
+            LogUtil.e("ApiKeyStore", "模型配置数据损坏，已重置", e)
+            emptyList()
+        }
     }
 
     fun loadModelsForPlatform(platformId: String): List<ModelConfig> =

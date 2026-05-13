@@ -6,6 +6,8 @@ import com.aiaggregator.app.data.model.Message
 import com.aiaggregator.app.data.model.Session
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.GlobalScope
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.map
@@ -24,6 +26,7 @@ object InMemoryStore {
     private val json = Json { ignoreUnknownKeys = true; encodeDefaults = true }
     private val fileMutex = Mutex()
     @Volatile private var lastMessagesSaveMs: Long = 0L
+    private var pendingMessagesSaveJob: Job? = null
 
     fun initialize(context: Context) {
         if (ctx != null) return
@@ -36,8 +39,11 @@ object InMemoryStore {
     // === Session ===
 
     suspend fun insertSession(session: Session) {
-        _sessions.update { it + session }
-        saveSessionsSync()
+        _sessions.update { list ->
+            val idx = list.indexOfFirst { it.id == session.id }
+            if (idx >= 0) { list.toMutableList().also { it[idx] = session } } else { list + session }
+        }
+        GlobalScope.launch(Dispatchers.IO) { fileMutex.withLock { saveSessionsSync() } }
     }
 
     fun getAllSessions(): Flow<List<Session>> = _sessions.map { list ->
@@ -50,38 +56,77 @@ object InMemoryStore {
     suspend fun deleteSession(sessionId: String) {
         _sessions.update { list -> list.filter { it.id != sessionId } }
         _messages.update { list -> list.filter { it.sessionId != sessionId } }
-        saveSessionsSync()
-        saveMessagesSync()
+        fileMutex.withLock { saveSessionsSync(); saveMessagesSync() }
     }
 
     suspend fun updateSessionTitle(sessionId: String, title: String) {
         _sessions.update { list -> list.map { if (it.id == sessionId) it.copy(title = title) else it } }
-        saveSessionsSync()
+        GlobalScope.launch(Dispatchers.IO) { fileMutex.withLock { saveSessionsSync() } }
     }
 
     suspend fun updateSessionActivity(sessionId: String, timestamp: Long) {
         _sessions.update { list ->
             list.map { if (it.id == sessionId) it.copy(lastActiveAt = timestamp, messageCount = it.messageCount + 1) else it }
         }
-        saveSessionsSync()
+        GlobalScope.launch(Dispatchers.IO) { fileMutex.withLock { saveSessionsSync() } }
     }
 
     // === Message ===
 
-    fun insertMessage(message: Message) {
+    fun insertMessage(message: Message, saveImmediately: Boolean = false) {
         _messages.update { list ->
             val mutable = list.toMutableList()
             val idx = mutable.indexOfFirst { it.id == message.id }
             if (idx >= 0) mutable[idx] = message else mutable.add(message)
             mutable
         }
+        if (saveImmediately) {
+            pendingMessagesSaveJob?.cancel()
+            pendingMessagesSaveJob = GlobalScope.launch(Dispatchers.IO) {
+                lastMessagesSaveMs = System.currentTimeMillis()
+                fileMutex.withLock { saveMessagesSync() }
+            }
+            return
+        }
         // Debounced save: at most once per 500ms to avoid thrashing during streaming
         val now = System.currentTimeMillis()
         if (now - lastMessagesSaveMs > 500) {
             lastMessagesSaveMs = now
-            GlobalScope.launch(Dispatchers.IO) {
+            pendingMessagesSaveJob?.cancel()
+            pendingMessagesSaveJob = GlobalScope.launch(Dispatchers.IO) {
                 fileMutex.withLock { saveMessagesSync() }
             }
+        } else {
+            pendingMessagesSaveJob?.cancel()
+            pendingMessagesSaveJob = GlobalScope.launch(Dispatchers.IO) {
+                delay(500)
+                lastMessagesSaveMs = System.currentTimeMillis()
+                fileMutex.withLock { saveMessagesSync() }
+            }
+        }
+    }
+
+    fun deleteMessage(messageId: String, saveImmediately: Boolean = true) {
+        _messages.update { list -> list.filter { it.id != messageId } }
+        if (saveImmediately) {
+            pendingMessagesSaveJob?.cancel()
+            pendingMessagesSaveJob = GlobalScope.launch(Dispatchers.IO) {
+                lastMessagesSaveMs = System.currentTimeMillis()
+                fileMutex.withLock { saveMessagesSync() }
+            }
+        } else {
+            insertMessageSaveOnlyDebounced()
+        }
+    }
+
+    private fun insertMessageSaveOnlyDebounced() {
+        val now = System.currentTimeMillis()
+        pendingMessagesSaveJob?.cancel()
+        pendingMessagesSaveJob = GlobalScope.launch(Dispatchers.IO) {
+            val waitMs = (500 - (now - lastMessagesSaveMs)).coerceAtLeast(0)
+            if (waitMs > 0) delay(waitMs)
+            lastMessagesSaveMs = System.currentTimeMillis()
+            fileMutex.withLock { saveMessagesSync() }
         }
     }
 
@@ -90,31 +135,33 @@ object InMemoryStore {
 
     suspend fun deleteMessagesBySession(sessionId: String) {
         _messages.update { list -> list.filter { it.sessionId != sessionId } }
-        saveMessagesSync()
+        fileMutex.withLock { saveMessagesSync() }
     }
 
     // === Bulk ===
 
-    fun clearAll() {
+    suspend fun clearAll() {
         _sessions.value = emptyList()
         _messages.value = emptyList()
-        saveSessionsSync(); saveMessagesSync()
+        fileMutex.withLock { saveSessionsSync(); saveMessagesSync() }
     }
 
-    fun clearOlderThan(timestamp: Long): Int {
+    suspend fun clearOlderThan(timestamp: Long): Int {
+        val filteredMsgs = _messages.value.filter { it.timestamp >= timestamp }
         val before = _messages.value.size + _sessions.value.size
-        _messages.value = _messages.value.filter { it.timestamp >= timestamp }
-        _sessions.value = _sessions.value.filter { s -> _messages.value.any { it.sessionId == s.id } }
-        saveSessionsSync(); saveMessagesSync()
+        val activeSessionIds = filteredMsgs.map { it.sessionId }.toSet()
+        _messages.value = filteredMsgs
+        _sessions.value = _sessions.value.filter { it.id in activeSessionIds }
+        fileMutex.withLock { saveSessionsSync(); saveMessagesSync() }
         return before - (_messages.value.size + _sessions.value.size)
     }
 
-    fun clearNewerThan(timestamp: Long): Int {
+    suspend fun clearNewerThan(timestamp: Long): Int {
         val toDelete = _sessions.value.filter { it.createdAt >= timestamp }
         val ids = toDelete.map { it.id }.toSet()
-        _sessions.value = _sessions.value.filter { it.id !in ids }
-        _messages.value = _messages.value.filter { it.sessionId !in ids }
-        saveSessionsSync(); saveMessagesSync()
+        _sessions.update { list -> list.filter { it.id !in ids } }
+        _messages.update { list -> list.filter { it.sessionId !in ids } }
+        fileMutex.withLock { saveSessionsSync(); saveMessagesSync() }
         return toDelete.size
     }
 
@@ -133,8 +180,11 @@ object InMemoryStore {
     /**
      * Flush pending message saves immediately. Call before app goes to background.
      */
-    fun flushMessages() {
-        saveMessagesSync()
+    suspend fun flushMessages() {
+        pendingMessagesSaveJob?.cancel()
+        pendingMessagesSaveJob = null
+        lastMessagesSaveMs = System.currentTimeMillis()
+        fileMutex.withLock { saveMessagesSync() }
     }
 
     // === File I/O ===
@@ -143,11 +193,13 @@ object InMemoryStore {
         ctx?.let { c ->
             try {
                 val file = c.getFileStreamPath("sessions.json")
+                val tmp = java.io.File(file.parent, "sessions.json.tmp")
                 file.parentFile?.mkdirs()
-                java.io.FileOutputStream(file).use { fos ->
+                java.io.FileOutputStream(tmp).use { fos ->
                     fos.write(json.encodeToString(_sessions.value).toByteArray())
                     fos.fd.sync()
                 }
+                tmp.renameTo(file)
             } catch (e: Exception) { Log.e("InMemoryStore", "saveSessions failed", e) }
         }
     }
@@ -155,13 +207,14 @@ object InMemoryStore {
     private fun saveMessagesSync() {
         ctx?.let { c ->
             try {
-                val data = json.encodeToString(_messages.value)
                 val file = c.getFileStreamPath("messages.json")
+                val tmp = java.io.File(file.parent, "messages.json.tmp")
                 file.parentFile?.mkdirs()
-                java.io.FileOutputStream(file).use { fos ->
-                    fos.write(data.toByteArray())
+                java.io.FileOutputStream(tmp).use { fos ->
+                    fos.write(json.encodeToString(_messages.value).toByteArray())
                     fos.fd.sync()
                 }
+                tmp.renameTo(file)
             } catch (e: Exception) { Log.e("InMemoryStore", "saveMessages failed", e) }
         }
     }

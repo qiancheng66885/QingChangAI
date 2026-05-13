@@ -8,6 +8,7 @@ import com.aiaggregator.app.business.adapter.ImagePart
 import com.aiaggregator.app.business.adapter.ImageGenResult
 import com.aiaggregator.app.business.chat.ChatService
 import com.aiaggregator.app.data.local.ApiKeyStore
+import com.aiaggregator.app.data.local.ImageStorageManager
 import com.aiaggregator.app.data.local.InMemoryStore
 import com.aiaggregator.app.data.model.ContentType
 import com.aiaggregator.app.data.model.Message
@@ -35,6 +36,36 @@ import java.net.UnknownHostException
 import java.util.UUID
 
 class ChatViewModel(application: Application) : AndroidViewModel(application) {
+
+	private companion object {
+		private const val RICH_MARKDOWN_SYSTEM_PROMPT = """
+你是清畅AI中的助手。以下规则只控制回答的呈现方式，不改变用户请求本身。
+
+总原则：
+1. 默认使用简洁、自然、适合移动端阅读的 Markdown；只有在能明显提升理解、对比、排错或操作效率时，才使用表格、提示块、折叠等增强格式。
+2. 临时格式要求优先：如果用户明确指定“只输出 JSON / 不要 Markdown / 固定格式 / 表格 / 原文”等格式，按用户当前要求执行。
+3. 不确定是否需要复杂格式时，使用普通文本或普通列表，不要为了样式而样式化。
+4. 不要输出 HTML、CSS、JavaScript、XML，除非用户明确要求该格式；折叠内容只在确有必要时使用 details/summary。
+
+原文保护：
+1. 用户提供的代码、命令、配置、日志、报错、引用文本、待润色原文，必须保持语义和文本完整性。
+2. 当用户要求“原文/不要改/逐字/只排版/保留格式”时，不得擅自纠错、翻译、补全、删改、重排语义或替换链接文案。
+3. 如需解释，只在原文外部追加说明。
+
+格式触发规则：
+1. 表格仅用于三项以上对象横向对比、字段明确的参数/价格/版本/配置，或用户明确要求表格；两三点说明优先用列表。
+2. 提示块仅用于真实错误、重要风险、关键限制、验证完成或必要补充；普通说明不要套 info，普通建议不要套 warning，轻微问题不要套 error。
+3. 折叠仅用于较长且非核心的日志、配置、参考材料；核心结论、操作步骤、错误原因不要默认折叠。
+4. 代码、命令、JSON、配置、日志、正则表达式使用带语言名的 fenced code block。
+5. 链接优先使用有意义的 Markdown 命名链接；但用户要求保留原文时不要改写裸链。
+
+禁止过度格式化：
+1. 不要因为出现数字就强制表格。
+2. 不要给短回答强行加标题、分隔线、提示块或折叠。
+3. 不要无条件加粗重点、重写标题层级或插入装饰性符号。
+4. 不要主动添加图片，除非用户要求或图片 URL 来源可靠且与任务直接相关。
+"""
+	}
 
     private val chatService = ChatService()
     private val keyStore = ApiKeyStore(application)
@@ -110,7 +141,8 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         // Don't cancel imageGenJob/hintJob — let generation survive session switch
         sessionCollectorJob?.cancel()
         currentSessionId = sid
-        _genHint.value = ""
+        // Don't clear _genHint here: image generation may continue in another session.
+        // The UI uses each message timestamp as the authoritative elapsed timer.
         sessionCollectorJob = viewModelScope.launch {
             InMemoryStore.getMessagesBySession(sid).collect { _messages.value = it }
         }
@@ -142,12 +174,62 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun regenerate() {
-        val prompt = lastUserPrompt ?: return
-        val data = lastUserImageData
-        _messages.update { list ->
-            if (list.lastOrNull()?.role == MessageRole.ASSISTANT) list.dropLast(1) else list
+        viewModelScope.launch {
+            val sid = currentSessionId
+            if (sid.isBlank()) return@launch
+            val snapshot = _messages.value
+            val assistantIndex = snapshot.indexOfLast { it.role == MessageRole.ASSISTANT }
+            val sourceUser = if (assistantIndex >= 0) {
+                snapshot.take(assistantIndex).lastOrNull { it.role == MessageRole.USER }
+            } else {
+                snapshot.lastOrNull { it.role == MessageRole.USER }
+            }
+            if (sourceUser == null) {
+                InMemoryStore.insertMessage(
+                    Message(
+                        id = UUID.randomUUID().toString(), sessionId = sid,
+                        role = MessageRole.ASSISTANT,
+                        content = "⚠️ 找不到可重新生成的上一条用户输入。",
+                        contentType = ContentType.ERROR,
+                        timestamp = System.currentTimeMillis(), status = MessageStatus.DONE
+                    ),
+                    saveImmediately = true
+                )
+                return@launch
+            }
+
+            if (assistantIndex >= 0) {
+                InMemoryStore.deleteMessage(snapshot[assistantIndex].id)
+            }
+
+            lastUserPrompt = sourceUser.content
+            lastUserImageData = null
+            val model = _activeModel.value
+            val config = model?.let { keyStore.loadPlatforms().find { p -> p.id == it.platformId } }
+            val imageParts = withContext(Dispatchers.IO) {
+                sourceUser.allImageUrls.mapNotNull { url ->
+                    runCatching { readFileForUpload(android.net.Uri.parse(url)) }.getOrNull()
+                }
+            }
+            val chatImages = imageParts.map { p ->
+                com.aiaggregator.app.business.adapter.ChatImage(
+                    base64 = android.util.Base64.encodeToString(p.bytes, android.util.Base64.NO_WRAP),
+                    mimeType = p.mimeType
+                )
+            }
+            if (model?.category == ModelCategory.IMAGE) {
+                generateImageFlow(sid, sourceUser.content.ifBlank { "请描述这些图片" }, model, config, imageParts, editImage = false)
+            } else {
+                startStreamingChat(
+                    sid = sid,
+                    userText = sourceUser.content.ifBlank { "请描述这些图片" },
+                    config = config,
+                    model = model,
+                    images = chatImages,
+                    currentUserMessageId = sourceUser.id
+                )
+            }
         }
-        sendMessage(prompt, data?.first ?: emptyList(), editImage = data?.second ?: false)
     }
 
     fun sendMessage(text: String, fileUris: List<android.net.Uri> = emptyList(), editImage: Boolean = false) {
@@ -177,9 +259,18 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             val displayUris = mutableListOf<String>()
             val oversizedUris = mutableListOf<String>()
             withContext(Dispatchers.IO) {
+                val cr = getApplication<android.app.Application>().contentResolver
                 val imgDir = java.io.File(getApplication<android.app.Application>().filesDir, "images")
                 imgDir.mkdirs()
                 for (uri in fileUris) {
+                    val fileSize = try {
+                        cr.openFileDescriptor(uri, "r")?.use { it.statSize } ?: -1L
+                    } catch (_: Exception) { -1L }
+                    if (fileSize > 50 * 1024 * 1024) {
+                        oversizedUris.add(uri.toString())
+                        android.util.Log.w("AIAPP", "Skip oversized image before read: $uri (${fileSize} bytes)")
+                        continue
+                    }
                     val part = readFileForUpload(uri) ?: continue
                     if (part.bytes.size > 50 * 1024 * 1024) {
                         oversizedUris.add(uri.toString())
@@ -209,8 +300,8 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             if (imageParts.isNotEmpty() && userContent.isBlank()) userContent = "请描述这些图片"
 
             // Non-vision chat models can't handle images — warn and strip
-            val isImageModel = _activeModel.value?.category == ModelCategory.IMAGE
-            val effectiveParts = if (!isImageModel && imageParts.isNotEmpty()) {
+            val supportsVision = _activeModel.value?.category in setOf(ModelCategory.IMAGE, ModelCategory.MULTIMODAL)
+            val effectiveParts = if (!supportsVision && imageParts.isNotEmpty()) {
                 val warning = Message(id = java.util.UUID.randomUUID().toString(), sessionId = sid,
                     role = MessageRole.ASSISTANT, content = "⚠️ 当前模型不支持图片识别，图片未发送。\n请切换到支持视觉的模型后重试。",
                     timestamp = System.currentTimeMillis(), status = MessageStatus.DONE)
@@ -220,11 +311,12 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
 
             // Store persistent file:// URIs — survive app restart
             val allImageUris = displayUris
-            // For image models with files: pass first file's base64 for legacy compat
-            val firstBase64 = effectiveParts.firstOrNull()?.let { p ->
-                android.util.Base64.encodeToString(p.bytes, android.util.Base64.NO_WRAP)
+            val chatImages = effectiveParts.map { p ->
+                com.aiaggregator.app.business.adapter.ChatImage(
+                    base64 = android.util.Base64.encodeToString(p.bytes, android.util.Base64.NO_WRAP),
+                    mimeType = p.mimeType
+                )
             }
-            val firstMime = effectiveParts.firstOrNull()?.mimeType
 
             val um = Message(
                 id = UUID.randomUUID().toString(), sessionId = sid,
@@ -241,7 +333,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             if (model?.category == ModelCategory.IMAGE) {
                 generateImageFlow(sid, userContent, model, config, effectiveParts, editImage)
             } else {
-                startStreamingChat(sid, userContent, config, model, firstBase64, firstMime)
+                startStreamingChat(sid, userContent, config, model, chatImages, um.id)
             }
         }
     }
@@ -259,33 +351,56 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 }
             }
             if (!mimeType.startsWith("image/")) return null
+            val maxBytes = 50L * 1024L * 1024L
+            val maxUploadEdge = 3072
             // Three fallback methods — cropped images may need #2 or #3
             var bytes: ByteArray? = null
-            // Method 1: openInputStream
-            try { cr.openInputStream(uri)?.use { bytes = it.readBytes() } } catch (_: Exception) {}
-            // Method 2: openFileDescriptor
+            // Method 1: openInputStream with hard byte limit
+            try {
+                cr.openInputStream(uri)?.use { input ->
+                    bytes = readLimitedBytes(input, maxBytes)
+                }
+            } catch (e: IllegalArgumentException) {
+                android.util.Log.w("AIAPP", "Skip oversized image stream: $uri (${e.message})")
+                return null
+            } catch (_: Exception) {}
+            // Method 2: openFileDescriptor with sampled bitmap fallback
             if (bytes == null) {
                 try {
-                    val fd = cr.openFileDescriptor(uri, "r")
-                    if (fd != null) {
-                        val bmp = android.graphics.BitmapFactory.decodeFileDescriptor(fd.fileDescriptor)
-                        fd.close()
+                    cr.openFileDescriptor(uri, "r")?.use { fd ->
+                        val bounds = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }
+                        android.graphics.BitmapFactory.decodeFileDescriptor(fd.fileDescriptor, null, bounds)
+                        val opts = android.graphics.BitmapFactory.Options().apply {
+                            inSampleSize = calculateInSampleSize(bounds.outWidth, bounds.outHeight, maxUploadEdge, maxUploadEdge)
+                        }
+                        val bmp = android.graphics.BitmapFactory.decodeFileDescriptor(fd.fileDescriptor, null, opts)
                         if (bmp != null) {
-                            val stream = java.io.ByteArrayOutputStream()
-                            bmp.compress(if (mimeType.contains("png")) android.graphics.Bitmap.CompressFormat.PNG else android.graphics.Bitmap.CompressFormat.JPEG, 92, stream)
-                            bytes = stream.toByteArray()
+                            java.io.ByteArrayOutputStream().use { stream ->
+                                bmp.compress(if (mimeType.contains("png")) android.graphics.Bitmap.CompressFormat.PNG else android.graphics.Bitmap.CompressFormat.JPEG, 90, stream)
+                                bytes = stream.toByteArray().also {
+                                    if (it.size > maxBytes) throw IllegalArgumentException("compressed image exceeds ${maxBytes} bytes")
+                                }
+                            }
+                            bmp.recycle()
                         }
                     }
+                } catch (e: IllegalArgumentException) {
+                    android.util.Log.w("AIAPP", "Skip oversized decoded image: $uri (${e.message})")
+                    return null
+                } catch (e: OutOfMemoryError) {
+                    android.util.Log.e("AIAPP", "Image decode OOM: $uri", e)
+                    return null
                 } catch (_: Exception) {}
             }
-            // Method 3: openAssetFileDescriptor (some gallery apps only support this)
+            // Method 3: openAssetFileDescriptor with hard byte limit (some gallery apps only support this)
             if (bytes == null) {
                 try {
-                    val afd = cr.openAssetFileDescriptor(uri, "r")
-                    if (afd != null) {
-                        bytes = afd.createInputStream().use { it.readBytes() }
-                        afd.close()
+                    cr.openAssetFileDescriptor(uri, "r")?.use { afd ->
+                        bytes = afd.createInputStream().use { readLimitedBytes(it, maxBytes) }
                     }
+                } catch (e: IllegalArgumentException) {
+                    android.util.Log.w("AIAPP", "Skip oversized asset image: $uri (${e.message})")
+                    return null
                 } catch (_: Exception) {}
             }
             if (bytes == null) {
@@ -296,12 +411,38 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         } catch (e: Exception) { android.util.Log.e("AIAPP", "readFile err: ${e.message}"); return null }
     }
 
+    private fun readLimitedBytes(input: java.io.InputStream, maxBytes: Long): ByteArray {
+        val output = java.io.ByteArrayOutputStream()
+        val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+        var total = 0L
+        while (true) {
+            val read = input.read(buffer)
+            if (read == -1) break
+            total += read
+            if (total > maxBytes) throw IllegalArgumentException("image exceeds ${maxBytes} bytes")
+            output.write(buffer, 0, read)
+        }
+        return output.toByteArray()
+    }
+
+    private fun calculateInSampleSize(width: Int, height: Int, reqWidth: Int, reqHeight: Int): Int {
+        if (width <= 0 || height <= 0) return 1
+        var inSampleSize = 1
+        var halfWidth = width / 2
+        var halfHeight = height / 2
+        while ((halfWidth / inSampleSize) >= reqWidth || (halfHeight / inSampleSize) >= reqHeight) {
+            inSampleSize *= 2
+        }
+        return inSampleSize.coerceAtLeast(1)
+    }
+
     // ---- streaming chat ----
 
     private fun startStreamingChat(
         sid: String, userText: String,
         config: com.aiaggregator.app.data.model.ApiConfig?, model: ModelConfig?,
-        imageBase64: String? = null, imageMimeType: String? = null
+        images: List<com.aiaggregator.app.business.adapter.ChatImage> = emptyList(),
+        currentUserMessageId: String
     ) {
         if (model == null || config == null ||
             config.baseUrl.isBlank() || config.apiKey.isBlank() || model.modelName.isBlank()
@@ -323,42 +464,71 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         InMemoryStore.insertMessage(rm)
 
         streamJob = viewModelScope.launch {
+            val deltaBuffer = StringBuilder()
+            var lastFlushAt = 0L
+            fun flushBufferedContent() {
+                if (deltaBuffer.isEmpty()) return
+                val text = deltaBuffer.toString()
+                deltaBuffer.clear()
+                _messages.update { list ->
+                    list.map { if (it.id == rm.id) it.copy(content = it.content + text) else it }
+                }
+                lastFlushAt = System.currentTimeMillis()
+            }
+            fun appendBufferedContent(delta: String) {
+                deltaBuffer.append(delta)
+                val now = System.currentTimeMillis()
+                if (now - lastFlushAt >= 50L || deltaBuffer.length >= 512) {
+                    flushBufferedContent()
+                }
+            }
+
             try {
-                val history = _messages.value
-                    .filter { it.role != MessageRole.SYSTEM && it.id != rm.id }
-                    .let { if (it.size > 40) it.takeLast(40) else it } // trim to last 40 msgs
+                val conversationMessages = _messages.value
+                    .filter { it.role != MessageRole.SYSTEM && it.id != rm.id && it.id != currentUserMessageId }
+                    .let { if (it.size > 40) it.takeLast(40) else it }
                     .map { ChatMessageItem(it.role.name.lowercase(), it.content) } +
-                    ChatMessageItem("user", userText, imageBase64 = imageBase64, imageMimeType = imageMimeType)
+                    ChatMessageItem("user", userText, images = images)
+                val history = listOf(ChatMessageItem("system", RICH_MARKDOWN_SYSTEM_PROMPT.trim())) + conversationMessages
                 val cfg = config.copy()
 
                 withContext(Dispatchers.IO) {
                     withTimeout(300_000) {
                         chatService.streamChat(history, cfg, model.modelName).collect { chunk ->
-                        when {
-                            chunk.error != null -> finishWithError(rm, chunk.error)
-                            chunk.isDone -> {
-                            if (chunk.usage != null) {
-                                _messages.update { list -> list.map { if (it.id == rm.id) it.copy(promptTokens = chunk.usage!!.promptTokens, completionTokens = chunk.usage!!.completionTokens, tokenCount = chunk.usage!!.totalTokens) else it } }
+                            when {
+                                chunk.error != null -> {
+                                    flushBufferedContent()
+                                    finishWithError(rm, chunk.error)
+                                }
+                                chunk.isDone -> {
+                                    flushBufferedContent()
+                                    if (chunk.usage != null) {
+                                        _messages.update { list -> list.map { if (it.id == rm.id) it.copy(promptTokens = chunk.usage!!.promptTokens, completionTokens = chunk.usage!!.completionTokens, tokenCount = chunk.usage!!.totalTokens) else it } }
+                                    }
+                                    finishStreaming(rm)
+                                }
+                                chunk.content != null -> appendBufferedContent(chunk.content!!)
                             }
-                            finishStreaming(rm)
                         }
-                            chunk.content != null -> appendContent(rm, chunk.content!!)
-                        }
-                    }
                     } // withTimeout
                 }
             } catch (e: CancellationException) {
-                // user pressed stop — keep whatever was streamed so far
+                flushBufferedContent()
                 finishStreaming(rm)
             } catch (e: UnknownHostException) {
+                flushBufferedContent()
                 finishWithError(rm, "无法连接: ${e.message}")
             } catch (e: ConnectException) {
+                flushBufferedContent()
                 finishWithError(rm, "连接被拒绝")
             } catch (e: SocketTimeoutException) {
+                flushBufferedContent()
                 finishWithError(rm, "请求超时")
             } catch (e: java.io.IOException) {
+                flushBufferedContent()
                 finishWithError(rm, "网络异常: ${e.message}")
             } catch (e: Exception) {
+                flushBufferedContent()
                 finishWithError(rm, e.message ?: "未知错误")
             }
         }
@@ -371,11 +541,20 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private fun finishStreaming(rm: Message) {
-        _messages.update { list ->
-            list.map { if (it.id == rm.id) it.copy(status = MessageStatus.DONE) else it }
+        val current = _messages.value.find { it.id == rm.id } ?: rm
+        val final = if (current.content.isBlank()) {
+            current.copy(
+                content = "⚠️ 未收到模型返回内容。可能是模型只返回了工具调用/思考内容、联网搜索结果未透传，或中转站过滤了正文。请点击重新生成或切换模型/平台后重试。",
+                status = MessageStatus.DONE,
+                contentType = ContentType.ERROR
+            )
+        } else {
+            current.copy(status = MessageStatus.DONE)
         }
-        val final = _messages.value.find { it.id == rm.id } ?: rm
-        InMemoryStore.insertMessage(final)
+        _messages.update { list ->
+            list.map { if (it.id == rm.id) final else it }
+        }
+        InMemoryStore.insertMessage(final, saveImmediately = true)
     }
 
     private fun finishWithError(rm: Message, error: String) {
@@ -389,25 +568,39 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 else it
             }
         }
-        val final = _messages.value.find { it.id == rm.id } ?: rm.copy(content = display, status = MessageStatus.DONE)
-        InMemoryStore.insertMessage(final)
+        val final = _messages.value.find { it.id == rm.id } ?: rm.copy(content = display, status = MessageStatus.DONE, contentType = ContentType.ERROR)
+        InMemoryStore.insertMessage(final, saveImmediately = true)
     }
 
     private fun finishGenerating(rm: Message, sid: String, urls: List<String>?, error: String?) {
         _genHint.value = ""
         hintJob?.cancel(); hintJob = null
         imageGenJob = null
-        val final = if (error != null) {
+        val final = if (error != null && urls.isNullOrEmpty()) {
             rm.copy(content = "❌ $error", status = MessageStatus.DONE, contentType = ContentType.ERROR)
         } else {
-            rm.copy(content = "生成图片", imageUrls = urls ?: emptyList(),
-                status = MessageStatus.DONE, contentType = ContentType.IMAGE)
+            rm.copy(
+                content = error?.let { "生成图片\n\n⚠️ $it" } ?: "生成图片",
+                imageUrls = urls ?: emptyList(),
+                status = MessageStatus.DONE,
+                contentType = ContentType.IMAGE
+            )
         }
-        // Always persist
-        InMemoryStore.insertMessage(final)
-        // Only update UI if still on the same session
+        persistGeneratedMessage(final, sid)
+    }
+
+    private fun finishGenerationCancelled(rm: Message, sid: String) {
+        _genHint.value = ""
+        hintJob?.cancel(); hintJob = null
+        imageGenJob = null
+        val final = rm.copy(content = "已停止生成图片", status = MessageStatus.DONE, contentType = ContentType.TEXT)
+        persistGeneratedMessage(final, sid)
+    }
+
+    private fun persistGeneratedMessage(final: Message, sid: String) {
+        InMemoryStore.insertMessage(final, saveImmediately = true)
         if (sid == currentSessionId) {
-            _messages.update { list -> list.map { if (it.id == rm.id) final else it } }
+            _messages.update { list -> list.map { if (it.id == final.id) final else it } }
         }
     }
 
@@ -425,11 +618,20 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             InMemoryStore.insertMessage(rm)
             return
         }
+        if (imageGenJob?.isActive == true) {
+            val rm = Message(id = UUID.randomUUID().toString(), sessionId = sid, role = MessageRole.ASSISTANT,
+                content = "⚠️ 正在生成图片，请先等待完成或点击停止后再发送新的图片生成任务。",
+                timestamp = System.currentTimeMillis(), status = MessageStatus.DONE, contentType = ContentType.ERROR)
+            InMemoryStore.insertMessage(rm, saveImmediately = true)
+            return
+        }
 
+        val startedAt = System.currentTimeMillis()
         val rm = Message(id = UUID.randomUUID().toString(), sessionId = sid, role = MessageRole.ASSISTANT,
-            content = "", timestamp = System.currentTimeMillis(), status = MessageStatus.STREAMING,
-            contentType = ContentType.IMAGE, modelName = model.displayName.ifBlank { model.modelName })
-        InMemoryStore.insertMessage(rm)
+            content = "", timestamp = startedAt, status = MessageStatus.STREAMING,
+            contentType = ContentType.IMAGE, modelName = model.displayName.ifBlank { model.modelName },
+            metadata = "type=image_generation;startedAt=$startedAt;prompt=${prompt.take(120)};model=${model.modelName}")
+        InMemoryStore.insertMessage(rm, saveImmediately = true)
 
         // Start rotating hints in independent scope
         hintJob?.cancel()
@@ -473,18 +675,18 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 if (result.error != null) {
                     finishGenerating(rm, sid, null, result.error)
                 } else {
-                    val displayUrl = resolveDisplayUrl(result)
-                    if (displayUrl == null) {
-                        finishGenerating(rm, sid, null, "未返回图片")
+                    val imageResult = resolveDisplayUrl(result)
+                    if (imageResult.url == null) {
+                        finishGenerating(rm, sid, null, imageResult.cacheWarning ?: "未返回图片")
                     } else {
-                        finishGenerating(rm, sid, listOf(displayUrl), null)
+                        finishGenerating(rm, sid, listOf(imageResult.url), imageResult.cacheWarning)
                     }
                 }
             } catch (e: kotlinx.coroutines.CancellationException) {
-                // Silently stop — user switched away, generation result discarded
                 _genHint.value = ""
                 hintJob?.cancel(); hintJob = null
-                imageGenJob = null
+                if (imageGenJob === coroutineContext[Job]) imageGenJob = null
+                finishGenerationCancelled(rm, sid)
             } catch (e: Exception) {
                 val detail = when {
                     e is java.io.IOException -> "网络连接失败"
@@ -495,21 +697,22 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    private fun resolveDisplayUrl(result: ImageGenResult): String? {
-        // Prefer URL if available
-        result.urls.firstOrNull()?.let { return it }
-        // Decode first b64_json to cache file
-        result.base64Images.firstOrNull()?.let { b64 ->
-            return try {
-                val bytes = android.util.Base64.decode(b64, android.util.Base64.NO_WRAP)
-                val cacheDir = java.io.File(getApplication<android.app.Application>().filesDir, "images")
-                cacheDir.mkdirs()
-                val file = java.io.File(cacheDir, "gen_${System.currentTimeMillis()}.png")
-                file.writeBytes(bytes)
-                file.toURI().toString()
-            } catch (_: Exception) { null }
+    private data class ResolvedImageResult(
+        val url: String?,
+        val cacheWarning: String? = null
+    )
+
+    private fun resolveDisplayUrl(result: ImageGenResult): ResolvedImageResult {
+        val app = getApplication<android.app.Application>()
+        result.urls.firstOrNull()?.let { url ->
+            ImageStorageManager.persistImageUrl(app, url)?.let { return ResolvedImageResult(it) }
+            return ResolvedImageResult(url, "图片已生成，但本地缓存失败；当前先显示远程图片，分享或离线查看可能受影响。")
         }
-        return null
+        result.base64Images.firstOrNull()?.let { b64 ->
+            val local = ImageStorageManager.persistBase64Image(app, b64)
+            return ResolvedImageResult(local, if (local == null) "图片已返回，但本地保存失败。" else null)
+        }
+        return ResolvedImageResult(null)
     }
 
     private fun guessMimeFromUrl(url: String): String {
@@ -522,18 +725,9 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private suspend fun downloadImage(url: String): ByteArray? {
-        // If it's a local file:// URI, read directly
-        if (url.startsWith("file://")) {
-            return try {
-                java.io.File(java.net.URI(url)).readBytes()
-            } catch (_: Exception) { null }
+        return withContext(Dispatchers.IO) {
+            ImageStorageManager.readImageBytes(getApplication<android.app.Application>(), url)
         }
-        return try {
-            val client = com.aiaggregator.app.data.remote.HttpClientFactory.client
-            val request = okhttp3.Request.Builder().url(url).build()
-            val response = client.newCall(request).execute()
-            if (response.isSuccessful) response.body?.bytes() else null
-        } catch (_: Exception) { null }
     }
 
     // ---- helpers ----

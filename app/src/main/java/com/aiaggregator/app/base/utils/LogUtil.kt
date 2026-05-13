@@ -11,7 +11,7 @@ import android.util.Log
 object LogUtil {
 
     private const val TAG_PREFIX = "AIApp"
-    private var isDebug = true
+    private var isDebug = false // 生产环境默认关闭 debug 日志
 
     fun setDebug(debug: Boolean) {
         isDebug = debug

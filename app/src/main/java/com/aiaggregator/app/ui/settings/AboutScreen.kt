@@ -1,7 +1,5 @@
 package com.aiaggregator.app.ui.settings
 
-import android.content.Intent
-import android.net.Uri
 import android.widget.Toast
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.clickable
@@ -40,6 +38,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.unit.dp
 import com.aiaggregator.app.R
+import com.aiaggregator.app.base.ext.openUrl
 import kotlinx.coroutines.launch
 
 @Composable
@@ -48,6 +47,10 @@ fun AboutScreen() {
     val scope = rememberCoroutineScope()
     var showUpdateDialog by remember { mutableStateOf(UpdateChecker.Result()) }
     var checking by remember { mutableStateOf(false) }
+
+    fun openLink(url: String, failureMessage: String = "无法打开链接") {
+        ctx.openUrl(url, failureMessage)
+    }
 
     fun doCheck() {
         if (checking) return
@@ -75,7 +78,7 @@ fun AboutScreen() {
             },
             confirmButton = {
                 TextButton(onClick = {
-                    ctx.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(showUpdateDialog.downloadUrl)))
+                    openLink(showUpdateDialog.downloadUrl, "无法打开下载页面")
                     showUpdateDialog = UpdateChecker.Result()
                 }) { Text("去下载") }
             },
@@ -178,7 +181,7 @@ fun AboutScreen() {
                 Spacer(Modifier.height(12.dp))
                 Surface(
                     Modifier.fillMaxWidth().clickable {
-                        ctx.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://github.com/qiancheng66885/QingChangAI")))
+                        openLink("https://github.com/qiancheng66885/QingChangAI")
                     },
                     shape = RoundedCornerShape(12.dp),
                     color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
@@ -191,7 +194,7 @@ fun AboutScreen() {
                 Spacer(Modifier.height(8.dp))
                 Surface(
                     Modifier.fillMaxWidth().clickable {
-                        ctx.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://gitee.com/qiancheng2025/QingChangAI")))
+                        openLink("https://gitee.com/qiancheng2025/QingChangAI")
                     },
                     shape = RoundedCornerShape(12.dp),
                     color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)

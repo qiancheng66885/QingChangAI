@@ -32,6 +32,7 @@ class AnthropicAdapter : AiAdapter {
     private val json = Json { ignoreUnknownKeys = true }
 
     override fun streamChat(request: ChatRequest, config: ApiConfig): Flow<ChatChunk> = callbackFlow {
+        var doneSent = false
         var inputTokens = 0
         try {
             val body = buildJsonObject {
@@ -52,9 +53,11 @@ class AnthropicAdapter : AiAdapter {
                 }
             }
 
+            val (endpoint, isCustomEp) = AdapterUtils.effectiveChatEndpoint(config)
+            val (authName, authValue) = AdapterUtils.buildAuthHeader(config.apiKey, config.formatType, config.authHeaderName)
             val httpRequest = Request.Builder()
-                .url("${config.baseUrl.trimEnd('/')}/v1/messages")
-                .header("x-api-key", config.apiKey)
+                .url(AdapterUtils.buildUrl(config.baseUrl, endpoint, isCustomEp))
+                .header(authName, authValue)
                 .header("anthropic-version", "2023-06-01")
                 .header("Content-Type", "application/json")
                 .post(body.toString().toRequestBody("application/json".toMediaType()))
@@ -88,49 +91,47 @@ class AnthropicAdapter : AiAdapter {
                                 if (stopReason != null) {
                                     val outputTokens = obj["usage"]?.jsonObject
                                         ?.get("output_tokens")?.jsonPrimitive?.content?.toIntOrNull() ?: 0
-                                    trySend(ChatChunk(content = null, isDone = true,
-                                        usage = TokenUsage(inputTokens, outputTokens, inputTokens + outputTokens)))
+                                    if (!doneSent) { doneSent = true; trySend(ChatChunk(content = null, isDone = true,
+                                        usage = TokenUsage(inputTokens, outputTokens, inputTokens + outputTokens))) }
                                     close()
                                 }
                             }
                             "message_stop" -> {
+                                if (!doneSent) { doneSent = true; trySend(ChatChunk(content = null, isDone = true)) }
                                 close()
                             }
                             "error" -> {
                                 val errorMsg = obj["error"]?.jsonObject
                                     ?.get("message")?.jsonPrimitive?.content ?: "未知错误"
-                                trySend(ChatChunk(content = null, isDone = true, error = errorMsg))
+                                if (!doneSent) { doneSent = true; trySend(ChatChunk(content = null, isDone = true, error = errorMsg)) }
                                 close()
                             }
                         }
                     } catch (e: Exception) {
                         LogUtil.w("AnthropicSSE", "SSE parse error: ${data.take(100)}", e)
-                        trySend(ChatChunk(content = null, isDone = true, error = "SSE 解析错误: ${e.message}"))
+                        if (!doneSent) { doneSent = true; trySend(ChatChunk(content = null, isDone = true, error = "SSE 解析错误: ${e.message}")) }
                         close()
                     }
                 }
 
                 override fun onClosed(es: EventSource) {
-                    trySend(ChatChunk(content = null, isDone = true))
+                    if (!doneSent) { doneSent = true; trySend(ChatChunk(content = null, isDone = true)) }
                     close()
                 }
 
                 override fun onFailure(es: EventSource, t: Throwable?, response: Response?) {
                     val errMsg = when {
-                        response?.code == 401 -> "认证失败，请检查 API 密钥"
-                        response?.code == 404 -> "模型不存在，请检查模型名称"
-                        response?.code == 429 -> "请求过于频繁，请稍后重试"
-                        response != null -> "API 错误 (${response.code})"
+                        response != null -> AdapterUtils.errorDetail(response)
                         else -> t?.message ?: "连接失败"
                     }
-                    trySend(ChatChunk(content = null, isDone = true, error = errMsg))
+                    if (!doneSent) { doneSent = true; trySend(ChatChunk(content = null, isDone = true, error = errMsg)) }
                     close(t)
                 }
             })
 
             awaitClose { eventSource.cancel() }
         } catch (e: Exception) {
-            trySend(ChatChunk(content = null, isDone = true, error = e.message ?: "连接失败"))
+            if (!doneSent) { doneSent = true; trySend(ChatChunk(content = null, isDone = true, error = e.message ?: "连接失败")) }
             close(e)
         }
     }
@@ -152,20 +153,26 @@ class AnthropicAdapter : AiAdapter {
             }
         }
 
+        val (endpoint, isCustomEp) = AdapterUtils.effectiveChatEndpoint(config)
+        val (authName, authValue) = AdapterUtils.buildAuthHeader(config.apiKey, config.formatType, config.authHeaderName)
         val httpRequest = Request.Builder()
-            .url("${config.baseUrl.trimEnd('/')}/v1/messages")
-            .header("x-api-key", config.apiKey)
+            .url(AdapterUtils.buildUrl(config.baseUrl, endpoint, isCustomEp))
+            .header(authName, authValue)
             .header("anthropic-version", "2023-06-01")
             .header("Content-Type", "application/json")
             .post(body.toString().toRequestBody("application/json".toMediaType()))
             .build()
 
         return try {
-            val response = restClient.newCall(httpRequest).execute()
-            val respBody = response.body?.string() ?: ""
-            if (!response.isSuccessful) return ChatResponse("", error = "HTTP ${response.code}: ${AdapterUtils.errorBodySummary(respBody)}")
-            AdapterUtils.validateJsonContentType(response)
-            parseResponse(respBody)
+            restClient.newCall(httpRequest).execute().use { response ->
+                if (!response.isSuccessful) {
+                    val respBody = response.body?.string() ?: ""
+                    return ChatResponse("", error = AdapterUtils.errorDetail(response, respBody))
+                }
+                AdapterUtils.validateJsonContentType(response)
+                val respBody = response.body?.string() ?: ""
+                parseResponse(respBody)
+            }
         } catch (e: IOException) {
             ChatResponse("", error = e.message ?: "网络连接失败")
         }
@@ -177,15 +184,17 @@ class AnthropicAdapter : AiAdapter {
             if (msg.content.isNotBlank()) {
                 add(buildJsonObject { put("type", "text"); put("text", msg.content) })
             }
-            if (msg.imageBase64 != null) {
-                add(buildJsonObject {
-                    put("type", "image")
-                    putJsonObject("source") {
-                        put("type", "base64")
-                        put("media_type", msg.imageMimeType ?: "image/jpeg")
-                        put("data", msg.imageBase64!!)
-                    }
-                })
+            if (msg.role == "user") {
+                msg.images.forEach { img ->
+                    add(buildJsonObject {
+                        put("type", "image")
+                        putJsonObject("source") {
+                            put("type", "base64")
+                            put("media_type", img.mimeType)
+                            put("data", img.base64)
+                        }
+                    })
+                }
             }
         }
     }

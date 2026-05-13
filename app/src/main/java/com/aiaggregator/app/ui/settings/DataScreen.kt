@@ -30,6 +30,10 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.rememberCoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -45,6 +49,7 @@ private data class TimeRange(val label: String, val timestamp: Long)
 @Composable
 fun DataScreen() {
     val ctx = LocalContext.current
+    val scope = rememberCoroutineScope()
     val now = System.currentTimeMillis()
     val cal = remember { Calendar.getInstance() }
 
@@ -67,6 +72,7 @@ fun DataScreen() {
     }
     var selected by remember { mutableStateOf<TimeRange?>(null) }
     var showConfirm by remember { mutableStateOf(false) }
+    var showCacheConfirm by remember { mutableStateOf(false) }
     val count = if (selected != null && selected!!.timestamp > 0L) {
         remember(selected) { InMemoryStore.countNewerThan(selected!!.timestamp) }
     } else if (selected?.timestamp == 0L) {
@@ -94,15 +100,7 @@ fun DataScreen() {
                 }
                 Spacer(Modifier.height(16.dp))
                 FilledTonalButton(
-                    onClick = {
-                        try {
-                            ctx.cacheDir?.deleteRecursively()
-                            ctx.externalCacheDir?.deleteRecursively()
-                            Toast.makeText(ctx, "缓存已清除", Toast.LENGTH_SHORT).show()
-                        } catch (e: Exception) {
-                            Toast.makeText(ctx, "清除失败: ${e.message}", Toast.LENGTH_SHORT).show()
-                        }
-                    },
+                    onClick = { showCacheConfirm = true },
                     shape = RoundedCornerShape(12.dp)
                 ) { Text("清除缓存") }
             }
@@ -145,6 +143,36 @@ fun DataScreen() {
             }
         }
 
+        if (showCacheConfirm) {
+            AlertDialog(
+                onDismissRequest = { showCacheConfirm = false },
+                icon = { Icon(Icons.Filled.Storage, null, tint = MaterialTheme.colorScheme.primary) },
+                title = { Text("确认清除缓存") },
+                text = { Text("将清除应用临时文件和图片缓存。") },
+                confirmButton = {
+                    TextButton(onClick = {
+                        scope.launch {
+                            try {
+                                withContext(Dispatchers.IO) {
+                                    ctx.cacheDir?.deleteRecursively()
+                                    ctx.externalCacheDir?.deleteRecursively()
+                                }
+                                Toast.makeText(ctx, "缓存已清除", Toast.LENGTH_SHORT).show()
+                            } catch (e: Exception) {
+                                Toast.makeText(ctx, "清除失败: ${e.message}", Toast.LENGTH_SHORT).show()
+                            } finally {
+                                showCacheConfirm = false
+                            }
+                        }
+                    }) { Text("确认清除") }
+                },
+                dismissButton = {
+                    TextButton(onClick = { showCacheConfirm = false }) { Text("取消") }
+                },
+                shape = RoundedCornerShape(20.dp)
+            )
+        }
+
         // Confirmation dialog
         if (showConfirm && selected != null) {
             AlertDialog(
@@ -165,15 +193,23 @@ fun DataScreen() {
                 },
                 confirmButton = {
                     TextButton(onClick = {
-                        val deleted = if (selected!!.timestamp > 0L) {
-                            InMemoryStore.clearNewerThan(selected!!.timestamp)
-                        } else {
-                            val total = InMemoryStore.countNewerThan(0L)
-                            InMemoryStore.clearAll()
-                            total
+                        scope.launch {
+                            try {
+                                val deleted = withContext(Dispatchers.IO) {
+                                    if (selected!!.timestamp > 0L) {
+                                        InMemoryStore.clearNewerThan(selected!!.timestamp)
+                                    } else {
+                                        val total = InMemoryStore.countNewerThan(0L)
+                                        InMemoryStore.clearAll()
+                                        total
+                                    }
+                                }
+                                Toast.makeText(ctx, "已删除 $deleted 条对话", Toast.LENGTH_SHORT).show()
+                                showConfirm = false; selected = null
+                            } catch (e: Exception) {
+                                Toast.makeText(ctx, "删除失败: ${e.message}", Toast.LENGTH_SHORT).show()
+                            }
                         }
-                        Toast.makeText(ctx, "已删除 $deleted 条对话", Toast.LENGTH_SHORT).show()
-                        showConfirm = false; selected = null
                     }) { Text("确认删除", color = MaterialTheme.colorScheme.error) }
                 },
                 dismissButton = {

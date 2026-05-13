@@ -44,13 +44,20 @@ data class ChatRequest(
 )
 
 /**
+ * 聊天消息中的图片。
+ */
+data class ChatImage(
+    val base64: String,
+    val mimeType: String = "image/jpeg"
+)
+
+/**
  * 聊天消息项。
  */
 data class ChatMessageItem(
     val role: String,   // "system" | "user" | "assistant"
     val content: String,
-    val imageBase64: String? = null,  // base64-encoded image for multimodal
-    val imageMimeType: String? = null // e.g. "image/jpeg", "image/png"
+    val images: List<ChatImage> = emptyList()
 )
 
 /**

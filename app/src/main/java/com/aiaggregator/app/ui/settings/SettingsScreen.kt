@@ -3,8 +3,11 @@ package com.aiaggregator.app.ui.settings
 import android.app.Activity
 import android.content.Context
 import android.content.res.Configuration
+import android.widget.Toast
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -19,11 +22,12 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
-import androidx.compose.material.icons.filled.Brightness6
-import androidx.compose.material.icons.filled.DeleteOutline
+import androidx.compose.material.icons.filled.ColorLens
+import androidx.compose.material.icons.filled.CloudSync
+import androidx.compose.material.icons.filled.DeleteSweep
 import androidx.compose.material.icons.filled.Info
-import androidx.compose.material.icons.filled.Support
-import androidx.compose.material.icons.filled.Tune
+import androidx.compose.material.icons.filled.RocketLaunch
+import androidx.compose.material.icons.filled.SupportAgent
 import androidx.compose.material3.ElevatedCard
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.FilterChip
@@ -68,7 +72,7 @@ fun SettingsScreen(onNavConfig: () -> Unit, onNavData: () -> Unit, onNavAbout: (
         verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
         // ── Appearance ──
-        SectionHeader(t("外观", "Appearance"), Icons.Filled.Brightness6)
+        SectionHeader(t("外观", "Appearance"), Icons.Filled.ColorLens)
         ElevatedCard(
             Modifier.fillMaxWidth(),
             shape = RoundedCornerShape(20.dp),
@@ -96,7 +100,20 @@ fun SettingsScreen(onNavConfig: () -> Unit, onNavData: () -> Unit, onNavAbout: (
                         }
                         FilterChip(
                             selected = settings?.themeMode == mode,
-                            onClick = { scope.launch { store.setThemeMode(mode) } },
+                            onClick = {
+                                scope.launch {
+                                    try {
+                                        if (settings?.themeMode == mode) {
+                                            Toast.makeText(ctx, t("已选择：$label", "Selected: $label"), Toast.LENGTH_SHORT).show()
+                                            return@launch
+                                        }
+                                        store.setThemeMode(mode)
+                                        Toast.makeText(ctx, t("主题已切换为：$label", "Theme changed to: $label"), Toast.LENGTH_SHORT).show()
+                                    } catch (e: Exception) {
+                                        Toast.makeText(ctx, t("主题切换失败：${e.message}", "Theme change failed: ${e.message}"), Toast.LENGTH_SHORT).show()
+                                    }
+                                }
+                            },
                             label = { Text(label) },
                             colors = FilterChipDefaults.filterChipColors(
                                 selectedContainerColor = MaterialTheme.colorScheme.primaryContainer,
@@ -121,9 +138,18 @@ fun SettingsScreen(onNavConfig: () -> Unit, onNavData: () -> Unit, onNavAbout: (
                             selected = settings?.language == lang,
                             onClick = {
                                 scope.launch {
-                                    store.setLanguage(lang)
-                                    applyLanguage(ctx, lang)
-                                    (ctx as? Activity)?.recreate()
+                                    try {
+                                        if (settings?.language == lang) {
+                                            Toast.makeText(ctx, t("已选择：$label", "Selected: $label"), Toast.LENGTH_SHORT).show()
+                                            return@launch
+                                        }
+                                        store.setLanguage(lang)
+                                        Toast.makeText(ctx, t("语言已切换为：$label", "Language changed to: $label"), Toast.LENGTH_SHORT).show()
+                                        applyLanguage(ctx, lang)
+                                        (ctx as? Activity)?.recreate()
+                                    } catch (e: Exception) {
+                                        Toast.makeText(ctx, t("语言切换失败：${e.message}", "Language change failed: ${e.message}"), Toast.LENGTH_SHORT).show()
+                                    }
                                 }
                             },
                             label = { Text(label) },
@@ -138,18 +164,18 @@ fun SettingsScreen(onNavConfig: () -> Unit, onNavData: () -> Unit, onNavAbout: (
         }
 
         // ── Features ──
-        SectionHeader(t("功能", "Features"), Icons.Filled.Tune)
+        SectionHeader(t("功能", "Features"), Icons.Filled.RocketLaunch)
         ElevatedCard(
             Modifier.fillMaxWidth(),
             shape = RoundedCornerShape(20.dp),
             colors = CardDefaults.elevatedCardColors()
         ) {
             Column {
-                NavRow(Icons.Filled.Tune, t("API 配置", "API Config"), t("管理平台和模型", "Manage platforms & models")) { onNavConfig() }
+                NavRow(Icons.Filled.CloudSync, t("API 配置", "API Config"), t("管理平台和模型", "Manage platforms & models")) { onNavConfig() }
                 HorizontalDivider(Modifier.padding(horizontal = 20.dp))
-                NavRow(Icons.Filled.DeleteOutline, t("数据管理", "Data"), t("清除缓存和聊天记录", "Clear cache & history")) { onNavData() }
+                NavRow(Icons.Filled.DeleteSweep, t("数据管理", "Data"), t("清除缓存和聊天记录", "Clear cache & history")) { onNavData() }
                 HorizontalDivider(Modifier.padding(horizontal = 20.dp))
-                NavRow(Icons.Filled.Support, t("软件支持与教程", "Support"), t("使用帮助和常见问题", "Help & FAQ")) { onNavSupport() }
+                NavRow(Icons.Filled.SupportAgent, t("软件支持与教程", "Support"), t("使用帮助和常见问题", "Help & FAQ")) { onNavSupport() }
                 HorizontalDivider(Modifier.padding(horizontal = 20.dp))
                 NavRow(Icons.Filled.Info, t("关于", "About"), "${t("版本", "Version")} ${UpdateChecker.getAppVersion()}") { onNavAbout() }
             }
@@ -172,7 +198,14 @@ private fun NavRow(icon: ImageVector, title: String, subtitle: String, onClick: 
         Modifier.fillMaxWidth().clickable { onClick() }.padding(20.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        Icon(icon, null, Modifier.size(22.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+        Box(
+            Modifier
+                .size(44.dp)
+                .background(MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.72f), RoundedCornerShape(16.dp)),
+            contentAlignment = Alignment.Center
+        ) {
+            Icon(icon, null, Modifier.size(22.dp), tint = MaterialTheme.colorScheme.onPrimaryContainer)
+        }
         Spacer(Modifier.width(16.dp))
         Column(Modifier.weight(1f)) {
             Text(title, style = MaterialTheme.typography.titleSmall)

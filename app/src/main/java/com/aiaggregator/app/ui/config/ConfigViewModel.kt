@@ -19,7 +19,8 @@ class ConfigViewModel(application: Application) : AndroidViewModel(application) 
     fun saveModel(model: ModelConfig) = store.saveModel(model)
     fun deleteModel(id: String) = store.deleteModel(id)
     fun setDefaultModel(id: String) {
-        store.loadModels().map { it.copy(isDefault = it.id == id) }.forEach { store.saveModel(it) }
+        val updated = store.loadModels().map { it.copy(isDefault = it.id == id) }
+        store.saveAllModels(updated)
     }
     fun getActiveModel(): ModelConfig? = store.getActiveModel()
     fun getPlatform(id: String): ApiConfig? = store.loadPlatforms().find { it.id == id }

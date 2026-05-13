@@ -24,7 +24,9 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
+import com.aiaggregator.app.base.ext.openUrl
 
 @Composable
 fun SupportScreen() {
@@ -54,7 +56,7 @@ fun SupportScreen() {
         }
 
         // 在线指南
-        val ctx = androidx.compose.ui.platform.LocalContext.current
+        val ctx = LocalContext.current
         ElevatedCard(
             Modifier.fillMaxWidth(),
             shape = RoundedCornerShape(20.dp),
@@ -73,11 +75,7 @@ fun SupportScreen() {
                     Modifier.clip(RoundedCornerShape(10.dp))
                         .background(MaterialTheme.colorScheme.primaryContainer)
                         .clickable {
-                            val intent = android.content.Intent(
-                                android.content.Intent.ACTION_VIEW,
-                                android.net.Uri.parse("https://qcnpe82ha2n0.aiforce.cloud/app/app_4k44ynudr772t")
-                            )
-                            ctx.startActivity(intent)
+                            ctx.openUrl("https://qcnpe82ha2n0.aiforce.cloud/app/app_4k44ynudr772t")
                         }
                         .padding(horizontal = 16.dp, vertical = 10.dp)
                 ) {

@@ -31,8 +31,8 @@ class ChatService {
     fun streamChat(msgs: List<ChatMessageItem>, cfg: ApiConfig, modelName: String, extraParams: Map<String, String> = emptyMap()): Flow<ChatChunk> =
         getAdapter(cfg).streamChat(ChatRequest(model = modelName, messages = msgs, extraParams = extraParams), cfg)
 
-    suspend fun syncChat(msgs: List<ChatMessageItem>, cfg: ApiConfig, modelName: String): ChatResponse =
-        getAdapter(cfg).syncChat(ChatRequest(model = modelName, messages = msgs), cfg)
+    suspend fun syncChat(msgs: List<ChatMessageItem>, cfg: ApiConfig, modelName: String, extraParams: Map<String, String> = emptyMap()): ChatResponse =
+        getAdapter(cfg).syncChat(ChatRequest(model = modelName, messages = msgs, extraParams = extraParams), cfg)
 
     suspend fun generateImage(prompt: String, modelName: String, cfg: ApiConfig): ImageGenResult =
         imageGenAdapter.generate(ImageGenRequest(model = modelName, prompt = prompt), cfg)

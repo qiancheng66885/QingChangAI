@@ -14,7 +14,12 @@ data class ApiConfig(
     val baseUrl: String = "",
     @SerialName("apiKeyEncrypted")  // backward compat — stored JSON uses old name
     val apiKey: String = "",
-    val formatType: ApiFormatType = ApiFormatType.OPENAI_COMPATIBLE
+    val formatType: ApiFormatType = ApiFormatType.OPENAI_COMPATIBLE,
+    // 自定义端点路径（null = 使用默认值），空字符串视为 null
+    val chatEndpoint: String? = null,
+    val imageGenEndpoint: String? = null,
+    val imageEditEndpoint: String? = null,
+    val authHeaderName: String? = null
 )
 
 /**

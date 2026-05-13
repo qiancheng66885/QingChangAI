@@ -46,9 +46,11 @@ class OpenAiAdapter : AiAdapter {
                 }
             }
 
+            val (endpoint, isCustomEp) = AdapterUtils.effectiveChatEndpoint(config)
+            val (authName, authValue) = AdapterUtils.buildAuthHeader(config.apiKey, config.formatType, config.authHeaderName)
             val httpRequest = Request.Builder()
-                .url("${config.baseUrl.trimEnd('/').removeSuffix("/v1")}/v1/chat/completions")
-                .header("Authorization", "Bearer ${config.apiKey}")
+                .url(AdapterUtils.buildUrl(config.baseUrl, endpoint, isCustomEp))
+                .header(authName, authValue)
                 .header("Content-Type", "application/json")
                 .post(body.toString().toRequestBody("application/json".toMediaType()))
                 .build()
@@ -79,8 +81,8 @@ class OpenAiAdapter : AiAdapter {
                         if (!doneSent) {
                             doneSent = true
                             trySend(ChatChunk(content = null, isDone = true, error = "SSE 解析错误: ${e.message}"))
-                            close()
                         }
+                        close()
                     }
                 }
 
@@ -91,10 +93,7 @@ class OpenAiAdapter : AiAdapter {
 
                 override fun onFailure(es: EventSource, t: Throwable?, response: okhttp3.Response?) {
                     val errMsg = when {
-                        response?.code == 401 -> "认证失败，请检查 API 密钥"
-                        response?.code == 404 -> "模型不存在，请检查模型名称"
-                        response?.code == 429 -> "请求过于频繁，请稍后重试"
-                        response != null -> "API 错误 (${response.code})"
+                        response != null -> AdapterUtils.errorDetail(response)
                         else -> t?.message ?: "连接失败"
                     }
                     if (!doneSent) { doneSent = true; trySend(ChatChunk(content = null, isDone = true, error = errMsg)) }
@@ -123,21 +122,25 @@ class OpenAiAdapter : AiAdapter {
             }
         }
 
+        val (endpoint, isCustomEp) = AdapterUtils.effectiveChatEndpoint(config)
+        val (authName, authValue) = AdapterUtils.buildAuthHeader(config.apiKey, config.formatType, config.authHeaderName)
         val httpRequest = Request.Builder()
-            .url("${config.baseUrl.trimEnd('/').removeSuffix("/v1")}/v1/chat/completions")
-            .header("Authorization", "Bearer ${config.apiKey}")
+            .url(AdapterUtils.buildUrl(config.baseUrl, endpoint, isCustomEp))
+            .header(authName, authValue)
             .header("Content-Type", "application/json")
             .post(body.toString().toRequestBody("application/json".toMediaType()))
             .build()
 
         return try {
-            val response = restClient.newCall(httpRequest).execute()
-            val respBody = response.body?.string() ?: ""
-            if (!response.isSuccessful) {
-                return ChatResponse("", error = "HTTP ${response.code}: ${AdapterUtils.errorBodySummary(respBody)}")
+            restClient.newCall(httpRequest).execute().use { response ->
+                if (!response.isSuccessful) {
+                    val respBody = response.body?.string() ?: ""
+                    return ChatResponse("", error = AdapterUtils.errorDetail(response, respBody))
+                }
+                AdapterUtils.validateJsonContentType(response)
+                val respBody = response.body?.string() ?: ""
+                parseResponse(respBody)
             }
-            AdapterUtils.validateJsonContentType(response)
-            parseResponse(respBody)
         } catch (e: IOException) {
             ChatResponse("", error = e.message ?: "网络连接失败")
         }
@@ -145,7 +148,7 @@ class OpenAiAdapter : AiAdapter {
 
     private fun buildOpenAiMessage(msg: ChatMessageItem) = buildJsonObject {
         put("role", msg.role)
-        if (msg.imageBase64 != null && msg.role == "user") {
+        if (msg.images.isNotEmpty() && msg.role == "user") {
             putJsonArray("content") {
                 if (msg.content.isNotBlank()) {
                     add(buildJsonObject {
@@ -153,12 +156,14 @@ class OpenAiAdapter : AiAdapter {
                         put("text", msg.content)
                     })
                 }
-                add(buildJsonObject {
-                    put("type", "image_url")
-                    putJsonObject("image_url") {
-                        put("url", "data:${msg.imageMimeType ?: "image/jpeg"};base64,${msg.imageBase64}")
-                    }
-                })
+                msg.images.forEach { img ->
+                    add(buildJsonObject {
+                        put("type", "image_url")
+                        putJsonObject("image_url") {
+                            put("url", "data:${img.mimeType};base64,${img.base64}")
+                        }
+                    })
+                }
             }
         } else {
             put("content", msg.content)

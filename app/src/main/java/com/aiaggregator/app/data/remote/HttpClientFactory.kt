@@ -15,7 +15,7 @@ object HttpClientFactory {
             .writeTimeout(120, TimeUnit.SECONDS)
             .callTimeout(5, TimeUnit.MINUTES) // absolute cap — zombie connections die here
             .addInterceptor(HttpLoggingInterceptor().apply {
-                level = HttpLoggingInterceptor.Level.HEADERS
+                level = HttpLoggingInterceptor.Level.BASIC // 不记录 header 防泄露 API 密钥
             })
             .build()
     }
@@ -28,7 +28,7 @@ object HttpClientFactory {
             .callTimeout(5, TimeUnit.MINUTES)
             .writeTimeout(120, TimeUnit.SECONDS)
             .addInterceptor(HttpLoggingInterceptor().apply {
-                level = HttpLoggingInterceptor.Level.HEADERS
+                level = HttpLoggingInterceptor.Level.BASIC
             })
             .build()
     }
