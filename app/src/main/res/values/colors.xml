@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="purple_200">#FFEAF2FF</color>
+    <color name="purple_500">#FF0F63FF</color>
+    <color name="purple_700">#FF0A46B8</color>
+    <color name="teal_200">#FFF1F5FF</color>
+    <color name="teal_700">#FF2563EB</color>
+    <color name="black">#FF000000</color>
+    <color name="white">#FFFFFFFF</color>
+    <color name="app_splash_background">#FFFFFF</color>
+</resources>
